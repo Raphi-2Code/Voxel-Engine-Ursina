@@ -77,7 +77,7 @@ for z in range(60):
                       parent=terrain,color=color.white)  # texture="white_cube",
             chunk_faces[face] = pos_i
 terrain.combine()
-terrain.texture="ursina-tutorials-main/assets/sandMinecraft.jfif"
+terrain.texture="sandMinecraft.jfif"
 #terrain.collider='mesh'
 #EditorCamera()
 app.run()
