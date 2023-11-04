@@ -82,7 +82,7 @@ for x in range(30):
             pos_i = Vec3(elem[0] + x, elem[1] + y, elem[2] + z)
             rot_i = Vec3(elem[3], elem[4], elem[5])
             if pos_i+(-1.5,1.5,-1) in chunk_faces2:
-                face = Entity(model="plane", position=pos_i+(-1,1,-1), rotation=rot_i, color=color.red, texture="ursina-tutorials-main/assets/sandMinecraft.jfif")
+                face = Entity(model="plane", position=pos_i+(-1,1,-1), rotation=rot_i, texture="ursina-tutorials-main/assets/sandMinecraft.jfif")
                 chunk_faces.append(face)
                 chunk_faces2.append(face.position)
 app.run()
