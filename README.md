@@ -14,4 +14,4 @@ Old version
 
 
 # Known Bug(s)
-: No faces rendering between two faces pointing in the center of them
+~ No faces rendering between two faces pointing in the center of them
