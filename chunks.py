@@ -17,7 +17,7 @@ class Perlin:
 
     def get_height(self, x, z):
         return self.pNoise([x/self.freq, z/self.freq]) * self.amplitude
-window.color=color.azure#rgb(51,3,3)echte nether-farbe
+window.color=color.azure#rgb(51,3,3) is the real nether color
 chunk_faces=[]
 chunk_faces2=[]
 Text("Minecraft Java Edition v1.21",y=.5,x=-.886,color=color.black)
