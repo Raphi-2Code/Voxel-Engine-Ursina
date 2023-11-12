@@ -29,7 +29,7 @@ def gen_chunk(texture,xpos,zpos,chunk_size):
     terrain = Entity()
     for x in range(xpos,xpos+chunk_size):
         for z in range(zpos,zpos+chunk_size):
-            y = noise.get_height(x/3, z/3)
+            y = noise.get_height(round(round(x)/2), round(round(z)/2))
             y = math.floor(y * 7.5)
             elem = cube_faces[1]
             pos_i = Vec3(elem[0] + x, elem[1] + y, elem[2] + z)
