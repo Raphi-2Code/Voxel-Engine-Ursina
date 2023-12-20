@@ -185,13 +185,21 @@ def input(key):
                             new_chunk_faces3.append(chunk_faces3[pll])
                         else:
                             f_pos.append(pos_i)
-                        pll+=1#YESSSIRRR!!!
+                        pll+=1#YESSSIRRR!
                     chunk_faces2=new_chunk_faces2
                     chunk_faces=new_chunk_faces
                     chunk_faces3=new_chunk_faces3
                     for anti_f_pos in aqc2:
                         if not anti_f_pos in f_pos:
                             face = Entity(model="plane", position=anti_f_pos, rotation=aqc3[aqc2.index(anti_f_pos)],parent=terrain2)
+                            chunk_faces2.append(face.position)
+                            chunk_faces.append([face.x,face.z])
+                            if face.rotation==(180,0,0):chunk_faces3.append(0)
+                            if face.rotation==(0,0,0):chunk_faces3.append(1)
+                            if face.rotation==(90,0,0):chunk_faces3.append(2)
+                            if face.rotation==(-90,0,0):chunk_faces3.append(3)
+                            if face.rotation==(0,0,90):chunk_faces3.append(4)
+                            if face.rotation==(0,0,-90):chunk_faces3.append(5)
                     p=terrain2.combine()
                     terrain2.texture=texture
                     c.y=-9999
@@ -223,7 +231,7 @@ def input(key):
         p_uvs = p.uvs
         p.clear()
         try:
-            [p_verts.pop(count*6+_i_) for _i_ in 
+            [p_verts.pop(count*6+_i_) for _i_ in # mit _i_ mal nehmen und faces hervorheben
             range(6)]  # verts pos distance to mouse pos < 0.5 -> remove verts
             [p_uvs.pop(count*6+_i_) for _i_ in
             range(6)]  # index verts to remove -> update uvs
