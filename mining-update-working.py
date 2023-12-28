@@ -10,6 +10,8 @@ app=Ursina()#development_mode=False)
 player=FirstPersonController(gravity=0)
 cube_faces = [(0, 1, 0, 180, 0, 0), (0, 2, 0, 0, 0, 0), (0, 1.5, 0.5, 90, 0, 0), (0, 1.5, -0.5, -90, 0, 0),
               (0.5, 1.5, 0, 0, 0, 90), (-0.5, 1.5, 0, 0, 0, -90)]
+cube_faces2 = [(0, 2, 0, 180, 0, 0), (0, 1, 0, 0, 0, 0), (0, 1.5, -0.5, 90, 0, 0), (0, 1.5, 0.5, -90, 0, 0),
+              (-0.5, 1.5, 0, 0, 0, 90), (0.5, 1.5, 0, 0, 0, -90)]
 seed = ord('y') + ord('o')
 octaves = 0.5
 frequency = 8
@@ -207,126 +209,43 @@ def input(key):
         else:c.y=-9999
         save=0
     if save==2:
-        if mouse.hovered_entity == c:
-            #try:
-                    cube_=Entity()
-                    aqc2=[]
-                    aqc3=[]
-                    pos = Vec3(c.position) + (0, -1.5, 0)
-                    pll=0
-                    for i__ in range(6):
-                        elem = cube_faces[i__]#Vec3(vert)+Vec3(0.5,-1,0.5)
-                        pos_i = Vec3(elem[0] + pos[0], elem[1] + pos[1] - 1, elem[2] + pos[2])
-                        rot_i = Vec3(elem[3], elem[4], elem[5])
-                        #rot_i=(0,0,0)
-                        """if i__==2 or i__==3:
-                            rot_i = Vec3(elem[3], 180-elem[4], elem[5])
-                        if i__==4 or i__==5:
-                            rot_i = Vec3(elem[3]-180, elem[4], elem[5]-180)
-                        if i__==0 or i__==1:
-                            rot_i=(0,0,0)
-                            pos_i = pos_i+Vec3(0,-1,0)"""
-
-                        aqc3.append(rot_i)
-                        aqc2.append(pos_i)
-                    p.clear()
-                    destroy(terrain)
-                    terrain2=Entity()
-                    new_chunk_faces2=[]
-                    new_chunk_faces=[]
-                    new_chunk_faces3=[]
-                    f_pos=[]
-                    for element in chunk_faces2:
-                        elem = cube_faces[chunk_faces3[pll]]
-                        print(pll, len(chunk_faces3)-1)
-                        pos_i = Vec3(element[0], element[1], element[2])
-                        rot_i = Vec3(elem[3], elem[4], elem[5])
-                        if not pos_i+(0,1,0) in aqc2 and chunk_faces3[pll]==0:
-                            #print(aqc,pos_i)
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            #if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0],pos_i[1],pos_i[2]))
-                            new_chunk_faces.append([pos_i[0],pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-                        if not pos_i+(0,-1,0) in aqc2 and chunk_faces3[pll]==1:
-                            #print(aqc,pos_i)
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            #if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0],pos_i[1],pos_i[2]))
-                            new_chunk_faces.append([pos_i[0],pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-                        if chunk_faces3[pll]==2 and not pos_i+Vec3(0,0,-1) in aqc2:
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
-                            new_chunk_faces.append([pos_i[0], pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-                        if chunk_faces3[pll]==3 and not pos_i+Vec3(0,0,1) in aqc2:
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
-                            new_chunk_faces.append([pos_i[0], pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-                        if chunk_faces3[pll]==4 and not pos_i+Vec3(-1,0,0) in aqc2: #WEITERMACHEN
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
-                            new_chunk_faces.append([pos_i[0], pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-                        if chunk_faces3[pll]==5 and not pos_i+Vec3(1,0,0) in aqc2:
-                            face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                            # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                            new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
-                            new_chunk_faces.append([pos_i[0], pos_i[2]])
-                            new_chunk_faces3.append(chunk_faces3[pll])
-
-                        else:
-                            f_pos.append(pos_i)
-                        pll+=1#YESSSIRRR!
-                    chunk_faces2=new_chunk_faces2
-                    chunk_faces=new_chunk_faces
-                    chunk_faces3=new_chunk_faces3
-                    for anti_f_pos in aqc2:
-                        if not anti_f_pos in f_pos:
-                            face = Entity(model="plane", position=anti_f_pos, rotation=aqc3[aqc2.index(anti_f_pos)],parent=terrain2)
-
-                            """"if face.rotation==Vec3(180,0,0):chunk_faces3.append(1),print("0")
-                            if face.rotation==Vec3(0,0,0):chunk_faces3.append(0),print("1")
-                            if face.rotation==Vec3(90,180,0):chunk_faces3.append(3),print("2")
-                            if face.rotation==Vec3(-90,180,0):chunk_faces3.append(2),print("3")
-                            if face.rotation==Vec3(-180, 0, -90):chunk_faces3.append(5),print("4")
-                            if face.rotation==Vec3(-180,0,-270):chunk_faces3.append(4),print("5")
-                            else:
-                                chunk_faces3.append(0),print(face.rotation)"""
-                            if face.rotation == (0, 0, 0):
-                                chunk_faces3.append(0)
-                                face.rotation = (0,0,0)
-                            if face.rotation == (180, 0, 0):
-                                chunk_faces3.append(1)
-                                face.rotation = (0,0,0)
-                                #face.y -= 1
-                                #face.y += 1
-                            if face.rotation == (90, 0, 0):
-                                chunk_faces3.append(2)
-                                face.z -= 1
-                            if face.rotation == (-90, 0, 0):
-                                chunk_faces3.append(3)
-                                face.z += 1
-                            if face.rotation == (0, 0, 90):
-                                chunk_faces3.append(4)
-                                face.x -= 1
-                            if face.rotation == (0, 0, -90):
-                                chunk_faces3.append(5)
-                                face.x += 1
-                            chunk_faces2.append(face.position)
-                            chunk_faces.append([face.x, face.z])
-                    p=terrain2.combine()
-                    terrain2.texture=texture
-                    c.y=-9999
-            #except:print("SURFBREAD")
-        else:c.y=-9999
+        if mouse.hovered_entity==c:
+            p.clear()
+            destroy(terrain)
+            terrain2 = Entity()
+            for cube_face in cube_faces2:
+                pos___=Vec3(cube_face[0],cube_face[1],cube_face[2])+Vec3(c.position)+Vec3(0,-2.5,0)
+                if pos___ in chunk_faces2:
+                    cpos=chunk_faces2.index(pos___)
+                    chunk_faces3.pop(cpos)
+                    chunk_faces2.pop(cpos)
+                    chunk_faces.pop(cpos)
+                else:
+                    chunk_faces2.append(pos___)
+                    chunk_faces.append([pos___[0],pos___[2]])
+                    chunk_faces3.append(cube_faces2.index(cube_face))
+            new_chunk_faces=[]
+            new_chunk_faces2=[]
+            new_chunk_faces3=[]
+            pll=0
+            for element in chunk_faces2:
+                elem = cube_faces[chunk_faces3[pll]]
+                pos_i = Vec3(element[0], element[1], element[2])
+                rot_i = Vec3(elem[3], elem[4], elem[5])
+                face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
+                # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
+                new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
+                new_chunk_faces.append([pos_i[0], pos_i[2]])
+                new_chunk_faces3.append(chunk_faces3[pll])
+                pll += 1
+            print(pll,len(chunk_faces))
+            chunk_faces2=new_chunk_faces2
+            chunk_faces3=new_chunk_faces3
+            chunk_faces=new_chunk_faces
+            p=terrain2.combine()
+            terrain2.texture="sand"
+        c.y=-9999
         save=0
-    #DEN PLL BUG NOCH FIXEN!!!
     if key=="right mouse down":
         l = []
         try:
