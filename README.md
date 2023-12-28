@@ -1,5 +1,8 @@
 # Chunk Checking
 
+1) install perlin_noise
+2) run mining-update-working.py
+
 the building update is out
 ![image](https://github.com/Raphi-2Code/chunk-checking-like-windsurftweeds-did/assets/70066593/d9dce256-788c-42cc-8306-0e4980eb006f)
 
