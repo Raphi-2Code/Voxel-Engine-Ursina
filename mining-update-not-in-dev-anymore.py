@@ -217,14 +217,16 @@ def input(key):
                     for i__ in range(6):
                         elem = cube_faces[i__]#Vec3(vert)+Vec3(0.5,-1,0.5)
                         pos_i = Vec3(elem[0] + pos[0], elem[1] + pos[1] - 1, elem[2] + pos[2])
+                        rot_i = Vec3(elem[3], elem[4], elem[5])
                         #rot_i=(0,0,0)
-                        if i__==2 or i__==3:
+                        """if i__==2 or i__==3:
                             rot_i = Vec3(elem[3], 180-elem[4], elem[5])
                         if i__==4 or i__==5:
                             rot_i = Vec3(elem[3]-180, elem[4], elem[5]-180)
                         if i__==0 or i__==1:
                             rot_i=(0,0,0)
-                            pos_i = pos_i+Vec3(0,-1,0)
+                            pos_i = pos_i+Vec3(0,-1,0)"""
+
                         aqc3.append(rot_i)
                         aqc2.append(pos_i)
                     p.clear()
@@ -235,9 +237,8 @@ def input(key):
                     new_chunk_faces3=[]
                     f_pos=[]
                     for element in chunk_faces2:
-                        try:elem = cube_faces[chunk_faces3[pll]]
-                        except:break
-                        print(pll, len(chunk_faces3))
+                        elem = cube_faces[chunk_faces3[pll]]
+                        print(pll, len(chunk_faces3)-1)
                         pos_i = Vec3(element[0], element[1], element[2])
                         rot_i = Vec3(elem[3], elem[4], elem[5])
                         if not pos_i+(0,1,0) in aqc2 and chunk_faces3[pll]==0:
@@ -288,14 +289,37 @@ def input(key):
                     for anti_f_pos in aqc2:
                         if not anti_f_pos in f_pos:
                             face = Entity(model="plane", position=anti_f_pos, rotation=aqc3[aqc2.index(anti_f_pos)],parent=terrain2)
+
+                            """"if face.rotation==Vec3(180,0,0):chunk_faces3.append(1),print("0")
+                            if face.rotation==Vec3(0,0,0):chunk_faces3.append(0),print("1")
+                            if face.rotation==Vec3(90,180,0):chunk_faces3.append(3),print("2")
+                            if face.rotation==Vec3(-90,180,0):chunk_faces3.append(2),print("3")
+                            if face.rotation==Vec3(-180, 0, -90):chunk_faces3.append(5),print("4")
+                            if face.rotation==Vec3(-180,0,-270):chunk_faces3.append(4),print("5")
+                            else:
+                                chunk_faces3.append(0),print(face.rotation)"""
+                            if face.rotation == (0, 0, 0):
+                                chunk_faces3.append(0)
+                                face.rotation = (0,0,0)
+                            if face.rotation == (180, 0, 0):
+                                chunk_faces3.append(1)
+                                face.rotation = (0,0,0)
+                                #face.y -= 1
+                                #face.y += 1
+                            if face.rotation == (90, 0, 0):
+                                chunk_faces3.append(2)
+                                face.z -= 1
+                            if face.rotation == (-90, 0, 0):
+                                chunk_faces3.append(3)
+                                face.z += 1
+                            if face.rotation == (0, 0, 90):
+                                chunk_faces3.append(4)
+                                face.x -= 1
+                            if face.rotation == (0, 0, -90):
+                                chunk_faces3.append(5)
+                                face.x += 1
                             chunk_faces2.append(face.position)
-                            chunk_faces.append([face.x,face.z])
-                            if face.rotation==(180,0,0):chunk_faces3.append(0),print("0")
-                            if face.rotation==(0,0,0):chunk_faces3.append(1),print("1")
-                            if face.rotation==(90,0,0):chunk_faces3.append(2),print("2")
-                            if face.rotation==(-90,0,0):chunk_faces3.append(3),print("3")
-                            if face.rotation==(0,0,90):chunk_faces3.append(4),print("4")
-                            if face.rotation==(0,0,-90):chunk_faces3.append(5),print("5")
+                            chunk_faces.append([face.x, face.z])
                     p=terrain2.combine()
                     terrain2.texture=texture
                     c.y=-9999
@@ -311,6 +335,8 @@ def input(key):
         except:pass
         c.position=q
         save=1
+    #if save==3 and mouse.hovered_entity==c:
+
     if key=="left mouse down":
         l = []
         try:
