@@ -1,4 +1,4 @@
-# Chunk Checking
+# Voxel Engine Test
 
 1) install perlin_noise
 2) run mining-update-working.py
