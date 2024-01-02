@@ -5,7 +5,7 @@ from perlin_noise import *
 from itertools import *
 import math
 import numpy as np
-app=Ursina() #development_mode=False)
+app=Ursina()#development_mode=False)
 #player=FirstPersonController(gravity=0)
 player=FirstPersonController(gravity=0)
 cube_faces = [(0, 1, 0, 180, 0, 0), (0, 2, 0, 0, 0, 0), (0, 1.5, 0.5, 90, 0, 0), (0, 1.5, -0.5, -90, 0, 0),
@@ -150,7 +150,7 @@ def input(key):
         if mouse.hovered_entity == c:
             #try:
                     global chunk_faces,chunk_faces2,chunk_faces3
-                    cube_=Entity()
+                    #cube_=Entity()
                     aqc2=[]
                     aqc3=[]
                     pll=0
@@ -283,6 +283,8 @@ def input(key):
         p.uvs = p_uvs
         p.generate()
         count+=1
-    if key=="e":player.enabled=not player.enabled
+    if key=="e":
+        player.enabled=not player.enabled
+        print(len(scene.entities))
 #p.generate_normals(smooth=10)
 app.run()
