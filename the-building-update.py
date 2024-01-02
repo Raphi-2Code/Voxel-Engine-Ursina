@@ -91,7 +91,7 @@ for x in range(xpos, xpos + chunk_size):
             elem = cube_faces[4]
             pos_i = Vec3(elem[0] + x, elem[1] + y, elem[2] + z)
             rot_i = Vec3(elem[3], elem[4], elem[5])
-            if pos_i + (-1.5, 1.5, -1) in chunk_faces2:
+            if pos_i + (-1.5, 1.5, -1) in chunk_faces2  and pos_i+(-1.5,1.5,1) in chunk_faces2:
                 face = Entity(model="plane", position=pos_i + (-1, 1, -1), rotation=rot_i, parent=terrain)
                 chunk_faces.append([face.x,face.z])
                 chunk_faces2.append(face.position)
