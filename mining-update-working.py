@@ -5,7 +5,7 @@ from perlin_noise import *
 from itertools import *
 import math
 import numpy as np
-app=Ursina()#development_mode=False)
+app=Ursina() #development_mode=False)
 #player=FirstPersonController(gravity=0)
 player=FirstPersonController(gravity=0)
 cube_faces = [(0, 1, 0, 180, 0, 0), (0, 2, 0, 0, 0, 0), (0, 1.5, 0.5, 90, 0, 0), (0, 1.5, -0.5, -90, 0, 0),
