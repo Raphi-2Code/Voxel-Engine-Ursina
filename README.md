@@ -4,7 +4,7 @@
 2) run mining-update-working.py
 
 
-the mining update is out, but I have to fix one terrain generation bug
+the mining update is out
 
 
 the building update is out
