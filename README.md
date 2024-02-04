@@ -1,5 +1,7 @@
 # Voxel Engine Test
 
+Now we have more terrain with updated chunk borders, after I added mining and building, I'm going to release it! - 04.02.2024; 19.16
+
 1) install perlin_noise
 2) run mining-update-working.py
 
