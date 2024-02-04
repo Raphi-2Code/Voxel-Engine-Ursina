@@ -5,6 +5,9 @@ Now we have more terrain with updated chunk borders, after I added mining and bu
 1) install perlin_noise
 2) run mining-update-working.py
 
+# Known Bugs
+```no bugs currently```
+
 
 the mining update is out
 
@@ -23,9 +26,3 @@ Old version
 ![image](https://github.com/Raphi-2Code/chunk-checking-like-windsurftweeds-did/assets/70066593/867c8bb0-b746-4d46-9322-033ea640cb9e)
 //bad checking for z axis
 
-
-# Known Bug(s)
-            XXXXX ~ No faces rendering between two faces pointing in the center of them
-#11.11.2023
-fixed this bugs
-no bugs anymore
