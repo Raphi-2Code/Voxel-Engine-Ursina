@@ -8,8 +8,6 @@ Now we have more terrain with updated chunk borders, after I added mining and bu
 # Known Bugs
 ```no bugs currently```
 
-
-
 the mining update is out
 
 
