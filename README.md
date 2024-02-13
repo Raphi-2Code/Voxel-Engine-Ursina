@@ -1,5 +1,6 @@
 # Voxel Engine Test
 
+A new pre-release - 13.02.2024; 20:30
 Now we have more terrain with updated chunk borders, after I added mining and building, I'm going to release it! - 04.02.2024; 19:16
 
 1) install perlin_noise
