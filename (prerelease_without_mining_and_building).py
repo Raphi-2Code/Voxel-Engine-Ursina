@@ -86,7 +86,7 @@ def update():
     c2.position = floor(player.position + player.forward * 4)
 
 
-chunk_net="00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"
+chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"]
 count=0
 def build():
     global all_chunks, p
