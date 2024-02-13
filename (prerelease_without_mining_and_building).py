@@ -36,6 +36,8 @@ texture = "sand"
 xpos = 0
 zpos = 0
 chunk_size = 16
+combined_terrains=[]
+terrains=[]
 def get_from_server_and_render():
     chunks_opened_=list(eval(open('chunks.txt','r').read()))
     for chunks_opened in chunks_opened_:
@@ -55,6 +57,8 @@ def get_from_server_and_render():
         chunk_faces=[]
         chunk_faces3=[]
         p = terrain.combine()
+        combined_terrains.append(p)
+        terrains.append(terrain)
     return all_chunks
 all_chunks=get_from_server_and_render()
 #player.position=chunk_faces2[0]
@@ -65,6 +69,7 @@ save=0
 q=(0,-9999,0)
 c=Entity(model="cube",color=color.clear,collider="box")
 c2=Entity(model="cube",texture="frame")
+
 def update():
     global mode
     if mode==0:
@@ -81,15 +86,12 @@ def update():
     c2.position = floor(player.position + player.forward * 4)
 
 
-
+chunk_net="00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"
 count=0
 def build():
     global all_chunks, p
-    x=c.x//chunk_size
-    z=c.z//chunk_size
-    chunk_faces2 = all_chunks[x * z + 1]
-    chunk_faces = all_chunks[x * z]
-    chunk_faces3 = all_chunks[x * z + 2]
+    cint=chunk_net.index(str(str(round(c.x // chunk_size)) + str(round(c.z // chunk_size))))
+    chunk_faces,chunk_faces2,chunk_faces3=all_chunks[cint]
     # cube_=Entity()
     aqc2 = []
     aqc3 = []
@@ -107,8 +109,8 @@ def build():
         aqc3.append(rot_i)
         aqc2.append(pos_i)
 
-    p.clear()
-    destroy(terrain)
+    combined_terrains[cint].clear()
+    destroy(terrains[cint])
     terrain2 = Entity()
     new_chunk_faces2 = []
     new_chunk_faces = []
@@ -144,6 +146,8 @@ def build():
             if face.rotation == (0, 0, -90): chunk_faces3.append(5)
     all_chunks.append([chunk_faces,chunk_faces2,chunk_faces3])
     p = terrain2.combine()
+    terrains[cint]=terrain2
+    combined_terrains[cint] = p
     terrain2.texture = texture
     c.y = -9999
 def mine():
@@ -191,6 +195,7 @@ def mine():
     terrain2.texture = "sand"
 
 player.speed=20
+print(len(all_chunks))
 def input(key):
     global p,mode,save,q,count
     if key=="g":
@@ -223,6 +228,7 @@ def input(key):
         save=0
     if key=="right mouse down":
         l = []
+        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c.x // chunk_size)) + str(round(c.z // chunk_size))))]
         try:
             q = chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
                                                     round((player.forward[2]) * 4 + player.z)])] + (0, 0.5, 0)
@@ -233,6 +239,7 @@ def input(key):
 
     if key=="left mouse down":
         l = []
+
         try:
             q = chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
                                                 round((player.forward[2]) * 4 + player.z)])] + (0, 0.5, 0)
@@ -261,5 +268,6 @@ def input(key):
     if key=="e":
         player.enabled=not player.enabled
         print(len(scene.entities))
+    #print(all_chunks[round((c.x * chunk_size + c.z) // chunk_size)])
 #p.generate_normals(smooth=10)
 app.run()
