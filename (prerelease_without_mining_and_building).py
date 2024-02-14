@@ -144,7 +144,7 @@ def build():
             if face.rotation == (-90, 0, 0): chunk_faces3.append(3)
             if face.rotation == (0, 0, 90): chunk_faces3.append(4)
             if face.rotation == (0, 0, -90): chunk_faces3.append(5)
-    all_chunks.append([chunk_faces,chunk_faces2,chunk_faces3])
+    all_chunks[cint]=[chunk_faces,chunk_faces2,chunk_faces3]
     p = terrain2.combine()
     terrains[cint]=terrain2
     combined_terrains[cint] = p
