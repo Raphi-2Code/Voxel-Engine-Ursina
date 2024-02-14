@@ -90,7 +90,7 @@ chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31"
 count=0
 def build():
     global all_chunks, p
-    cint=chunk_net.index(str(str(round(c.x // chunk_size)) + str(round(c.z // chunk_size))))
+    cint=chunk_net.index(str(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size))))
     chunk_faces,chunk_faces2,chunk_faces3=all_chunks[cint]
     # cube_=Entity()
     aqc2 = []
@@ -228,7 +228,9 @@ def input(key):
         save=0
     if key=="right mouse down":
         l = []
-        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c.x // chunk_size)) + str(round(c.z // chunk_size))))]
+        print(str(str(int(c2.x // chunk_size)) + str(int(c2.z // chunk_size))))
+        #print(cint)
+        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c2.x // chunk_size)) + str(round(c2.z // chunk_size))))]
         try:
             q = chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
                                                     round((player.forward[2]) * 4 + player.z)])] + (0, 0.5, 0)
