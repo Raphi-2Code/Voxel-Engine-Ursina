@@ -86,7 +86,10 @@ def update():
     c2.position = floor(player.position + player.forward * 4)
 
 
-chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"]
+#chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"]
+
+chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]
+
 count=0
 def build():
     global all_chunks, p
@@ -120,7 +123,7 @@ def build():
         elem = cube_faces[chunk_faces3[pll]]
         pos_i = Vec3(element[0], element[1], element[2])
         rot_i = Vec3(elem[3], elem[4], elem[5])
-        if not pos_i in aqc2:
+        if not (pos_i in aqc2):
             # print(aqc,pos_i)
             face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
             # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
@@ -224,7 +227,7 @@ def input(key):
             mine()
         c.y=-9999
         save=0
-    if key=="right mouse down":
+    if key=="right mouse down" or key=="5":
         l = []
         print(str(str(int(c2.x // chunk_size)) + str(int(c2.z // chunk_size))))
         #print(cint)
