@@ -1,5 +1,10 @@
 # Voxel Engine Test
 
+I wasn't working on my voxel engine for a long time, but today I was working on it again, so the update is here. - 04.03.2025: 19>09
+
+![image](https://github.com/user-attachments/assets/9dcb5a2e-24a8-429a-b729-710fb52b7cd7)
+
+
 A new pre-release (mining + building, but there are some chunk border bugs) - 13.02.2024; 20:30
 
 ![image](https://github.com/Raphi-2Code/Voxel-Engine-Ursina/assets/70066593/0deef8c0-bb4f-4e7e-8ca2-6bf6a40c05cb)
