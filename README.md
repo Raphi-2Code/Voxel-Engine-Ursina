@@ -1,6 +1,6 @@
 # Voxel Engine Test
 
-I wasn't working on my voxel engine for a long time, but today I was working on it again, so the update is here. - 04.03.2025: 19>09
+I wasn't working on my voxel engine for a long time, but today I was working on it again, so the update is here. - 04.03.2025; 19:09
 
 ![image](https://github.com/user-attachments/assets/9dcb5a2e-24a8-429a-b729-710fb52b7cd7)
 
