@@ -48,7 +48,7 @@ def get_from_server_and_render():
         chunk_faces=[]
         chunk_faces3=[]
         for face_position in chunks_opened[0]:
-            if not face_position[2]>chunks_opened[0][0][2]+15:#yo 15 it is
+##            if not face_position[2]>chunks_opened[0][0][2]+15:#yo 15 it is
                 chunk_faces2.append(face_position)
                 chunk_faces.append([face_position[0],face_position[2]])
                 chunk_faces3.append(chunks_opened[1][chunks_opened[0].index(face_position)])
