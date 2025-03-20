@@ -8,6 +8,7 @@ import numpy as np
 app=Ursina()#development_mode=False)
 #player=FirstPersonController(gravity=0)
 player=FirstPersonController(gravity=0)
+
 cube_faces = [(0, 1, 0, 180, 0, 0), (0, 2, 0, 0, 0, 0), (0, 1.5, 0.5, 90, 0, 0), (0, 1.5, -0.5, -90, 0, 0),
               (0.5, 1.5, 0, 0, 0, 90), (-0.5, 1.5, 0, 0, 0, -90)]
 cube_faces2 = [(0, 2, 0, 180, 0, 0), (0, 1, 0, 0, 0, 0), (0, 1.5, -0.5, 90, 0, 0), (0, 1.5, 0.5, -90, 0, 0),
@@ -51,7 +52,10 @@ def get_from_server_and_render():
                 chunk_faces2.append(face_position)
                 chunk_faces.append([face_position[0],face_position[2]])
                 chunk_faces3.append(chunks_opened[1][chunks_opened[0].index(face_position)])
-                face = Entity(model="plane", position=face_position, rotation=cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]], parent=terrain)
+                face = Entity(model="plane", position=face_position, rotation=Vec3(cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][3],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][4],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][5]), parent=terrain)
+                #print(cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]])
+                #face.rotation = Vec3((face.rotation[0]), (face.rotation[1])-2, (face.rotation[2]))
+
         all_chunks.append([chunk_faces,chunk_faces2,chunk_faces3])
         chunk_faces2=[]
         chunk_faces=[]
@@ -165,7 +169,7 @@ def build():
         combined_terrains[chunk_idx].clear()
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
-            face = Entity(model="plane", position=face_pos, rotation=cube_faces[new_chunk_faces3[i]], parent=terrain2)
+            face = Entity(model="plane", position=face_pos, rotation=(cube_faces[new_chunk_faces3[i]][3],cube_faces[new_chunk_faces3[i]][4],cube_faces[new_chunk_faces3[i]][5]), parent=terrain2)
         p = terrain2.combine()
         terrains[chunk_idx] = terrain2
         combined_terrains[chunk_idx] = p
@@ -231,7 +235,7 @@ def mine():
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
             face = Entity(model="plane", position=face_pos,
-                          rotation=cube_faces[new_chunk_faces3[i]], parent=terrain2)
+                          rotation=(cube_faces[new_chunk_faces3[i]][3],cube_faces[new_chunk_faces3[i]][4],cube_faces[new_chunk_faces3[i]][5]), parent=terrain2)
 
         p = terrain2.combine()
         if hasattr(terrains[chunk_idx], 'disable'):
@@ -282,8 +286,10 @@ def input(key):
         #print(cint)
         chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c2.x // chunk_size)) + str(round(c2.z // chunk_size))))]
         try:
-            q = chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])] + (0, 0.5, 0)
+            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                    round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                    round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                    round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
         except:pass
         c.position=q
         save=1
@@ -293,8 +299,10 @@ def input(key):
         l = []
         chunk_faces,chunk_faces2,chunk_faces3=all_chunks[chunk_net.index(str(str(round(c2.x//chunk_size))+str(round(c2.z//chunk_size))))]
         try:
-            q = chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])] + (0, 0.5, 0)
+            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
+                                                round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
         except:
             pass
         c.position = q
