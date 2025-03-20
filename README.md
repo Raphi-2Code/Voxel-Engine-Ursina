@@ -1,5 +1,9 @@
 # Voxel Engine Test
 
+The rotation of a face is a Vec3 with 6 params, this causes a bug, the faces are minimally wrong rotated by 2 or 1.5°, I have to fix this: Vec3(cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][3],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][4],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][5])
+
+Imma put the updated file here when it's fixed
+
 I wasn't working on my voxel engine for a long time, but today I was working on it again, so the update is here. - 04.03.2025; 19:09
 
 ![image](https://github.com/user-attachments/assets/9dcb5a2e-24a8-429a-b729-710fb52b7cd7)
