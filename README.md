@@ -6,7 +6,7 @@ All the face checks are fixed!!! In the server and client!!!
 
 fixed!!!
 
-The rotation of a face is a Vec3 with 6 params, this causes a bug, the faces are minimally wrong rotated by 2 or 1.5°, I have to fix this: Vec3(cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][3],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][4],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][5])
+The rotation of a face is a Vec3 with 6 params, this causes a bug, the faces are minimally "misrotated" by 2 or 1.5°, I have to fix this: Vec3(cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][3],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][4],cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][5])
 
 Imma put the updated file here when it's fixed
 
