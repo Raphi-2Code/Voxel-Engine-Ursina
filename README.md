@@ -1,5 +1,7 @@
 # Voxel Engine Test
 
+advanced building/mining system in development!
+
 All the face checks are fixed!!! In the server and client!!!
 
 ![image](https://github.com/user-attachments/assets/fdd8eff8-1cee-4076-a285-2fa10bc93b98)
