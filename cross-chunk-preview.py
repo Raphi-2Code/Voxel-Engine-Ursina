@@ -74,6 +74,49 @@ q=(0,-9999,0)
 c=Entity(model="cube",color=color.clear,collider="box")
 c2=Entity(model="cube",texture="frame")
 
+_FACE_NORMALS = {
+    0: Vec3(0, -1, 0),
+    1: Vec3(0, 1, 0),
+    2: Vec3(0, 0, 1),
+    3: Vec3(0, 0, -1),
+    4: Vec3(1, 0, 0),
+    5: Vec3(-1, 0, 0),
+}
+
+
+def get_target_face(max_distance: int = 12):
+
+
+    origin = camera.world_position
+    direction = camera.forward
+
+    for i in range(int(max_distance * 2)):
+        step = i * 0.5
+        point = origin + direction * step
+
+        chunk_key = f"{int(point.x // chunk_size)}{int(point.z // chunk_size)}"
+        if chunk_key not in chunk_net:
+            continue
+
+        chunk_idx = chunk_net.index(chunk_key)
+        _, faces, face_indices = all_chunks[chunk_idx]
+
+        closest_face = None
+        closest_idx = None
+        min_dist = 0.6
+        for idx, fp in enumerate(faces):
+            d = distance(fp, point)
+            if d < min_dist:
+                min_dist = d
+                closest_face = fp
+                closest_idx = face_indices[idx]
+
+        if closest_face is not None:
+            normal = _FACE_NORMALS.get(closest_idx, Vec3(0, 1, 0))
+            return closest_face, normal
+
+    return None, None
+
 def update():
     global mode
     if mode==0:
@@ -87,7 +130,11 @@ def update():
 
         except:
             pass
-    c2.position = floor(player.position + player.forward * 4)
+    face_pos, _ = get_target_face()
+    if face_pos:
+        c2.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2]))+(0,-0.5,0)
+    else:
+        c2.position = floor(player.position + player.forward * 4)
 
 
 #chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"]
@@ -98,7 +145,7 @@ count=0
 
 
 def build():
-    global all_chunks, p, c, chunk_net, chunk_size, terrains, combined_terrains, texture
+    global all_chunks, c, chunk_net, chunk_size, terrains, combined_terrains, texture
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
     chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[cint]
@@ -115,8 +162,6 @@ def build():
     affected_chunks = {}
     affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}
 
-    cx = int(c.x // chunk_size)
-    cz = int(c.z // chunk_size)
     for face_pos, face_rot in new_faces:
         face_chunk_x = int(face_pos[0] // chunk_size)
         face_chunk_z = int(face_pos[2] // chunk_size)
@@ -151,31 +196,28 @@ def build():
                 data["to_add"].append((face_pos, face_rot))
                 new_chunk_faces2.append((face_pos[0], face_pos[1], face_pos[2]))
                 new_chunk_faces.append([face_pos[0], face_pos[2]])
-                if face_rot == Vec3(180, 0, 0):
-                    new_chunk_faces3.append(0)
-                elif face_rot == Vec3(0, 0, 0):
-                    new_chunk_faces3.append(1)
-                elif face_rot == Vec3(90, 0, 0):
-                    new_chunk_faces3.append(2)
-                elif face_rot == Vec3(-90, 0, 0):
-                    new_chunk_faces3.append(3)
-                elif face_rot == Vec3(0, 0, 90):
-                    new_chunk_faces3.append(4)
-                elif face_rot == Vec3(0, 0, -90):
-                    new_chunk_faces3.append(5)
+                rotation_indices = {Vec3(180, 0, 0): 0, Vec3(0, 0, 0): 1, Vec3(90, 0, 0): 2,
+                                    Vec3(-90, 0, 0): 3, Vec3(0, 0, 90): 4, Vec3(0, 0, -90): 5}
+                new_chunk_faces3.append(rotation_indices[face_rot])
 
         all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
 
-        combined_terrains[chunk_idx].clear()
+        if hasattr(terrains[chunk_idx], 'disable'):
+            terrains[chunk_idx].disable()
+
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
-            face = Entity(model="plane", position=face_pos, rotation=(cube_faces[new_chunk_faces3[i]][3],cube_faces[new_chunk_faces3[i]][4],cube_faces[new_chunk_faces3[i]][5]), parent=terrain2)
-        p = terrain2.combine()
+            Entity(model="plane", position=face_pos,
+                   rotation=(cube_faces[new_chunk_faces3[i]][3], cube_faces[new_chunk_faces3[i]][4], cube_faces[new_chunk_faces3[i]][5]),
+                   parent=terrain2)
+
+        combined_entity = terrain2.combine()
         terrains[chunk_idx] = terrain2
-        combined_terrains[chunk_idx] = p
+        combined_terrains[chunk_idx] = combined_entity
         terrain2.texture = texture
 
     c.y = -9999
+
 
 
 def mine():
@@ -281,32 +323,17 @@ def input(key):
         c.y=-9999
         save=0
     if key=="right mouse down" or key=="5":
-        l = []
-        print(str(str(int(c2.x // chunk_size)) + str(int(c2.z // chunk_size))))
-        #print(cint)
-        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c2.x // chunk_size)) + str(round(c2.z // chunk_size))))]
-        try:
-            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
-        except:pass
-        c.position=q
-        save=1
+        face_pos, normal = get_target_face()
+        if face_pos:
+            c.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2])) + Vec3(0, 0.5, 0)
+            save = 1
     #if save==3 and mouse.hovered_entity==c:
 
-    if key=="left mouse down":
-        l = []
-        chunk_faces,chunk_faces2,chunk_faces3=all_chunks[chunk_net.index(str(str(round(c2.x//chunk_size))+str(round(c2.z//chunk_size))))]
-        try:
-            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
-        except:
-            pass
-        c.position = q
-        save = 2
+    if key=="left mouse down" or key=="4":
+        face_pos, normal = get_target_face()
+        if face_pos:
+            c.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2])) + Vec3(0, 0.5, 0)
+            save = 2
 #        except:
 #            pass
     if key=="up arrow":
