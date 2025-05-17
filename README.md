@@ -4,7 +4,7 @@ Codex, the AI coding agent by OpenAI helped me adding the advanced block placeme
 
 
 ![image](https://github.com/user-attachments/assets/db7e8cd7-e8c4-4677-9d40-0381433d305b)
-
+This building system has a 12 block range (because Minecraft also has a 12 block range) and a cursor highlighting the block you can build on.
 
 
 advanced building/mining system in development!
