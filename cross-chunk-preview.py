@@ -84,6 +84,9 @@ _FACE_NORMALS = {
 }
 
 
+_FACE_OFFSETS = [Vec3(*cf[:3]) for cf in cube_faces]
+
+
 def get_target_face(max_distance: int = 12):
 
 
@@ -113,9 +116,9 @@ def get_target_face(max_distance: int = 12):
 
         if closest_face is not None:
             normal = _FACE_NORMALS.get(closest_idx, Vec3(0, 1, 0))
-            return closest_face, normal
+            return closest_face, normal, closest_idx
 
-    return None, None
+    return None, None, None
 
 def update():
     global mode
@@ -130,7 +133,7 @@ def update():
 
         except:
             pass
-    face_pos, _ = get_target_face()
+    face_pos, _, _ = get_target_face()
     if face_pos:
         c2.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2]))+(0,-0.5,0)
     else:
@@ -323,16 +326,18 @@ def input(key):
         c.y=-9999
         save=0
     if key=="right mouse down" or key=="5":
-        face_pos, normal = get_target_face()
+        face_pos, normal, face_idx = get_target_face()
         if face_pos:
-            c.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2])) + Vec3(0, 0.5, 0)
+            base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
+            c.position = base_pos + Vec3(0, 1.5, 0)
             save = 1
     #if save==3 and mouse.hovered_entity==c:
 
     if key=="left mouse down" or key=="4":
-        face_pos, normal = get_target_face()
+        face_pos, normal, face_idx = get_target_face()
         if face_pos:
-            c.position = Vec3(round(face_pos[0]),round(face_pos[1]),round(face_pos[2])) + Vec3(0, 0.5, 0)
+            base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
+            c.position = base_pos + Vec3(0, 1.5, 0)
             save = 2
 #        except:
 #            pass
