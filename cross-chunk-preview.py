@@ -74,6 +74,56 @@ q=(0,-9999,0)
 c=Entity(model="cube",color=color.clear,collider="box")
 c2=Entity(model="cube",texture="frame")
 
+# Mapping from face index stored in ``chunk_faces3`` to a world-space normal.
+_FACE_NORMALS = {
+    0: Vec3(0, -1, 0),  # bottom
+    1: Vec3(0, 1, 0),   # top
+    2: Vec3(0, 0, 1),   # south
+    3: Vec3(0, 0, -1),  # north
+    4: Vec3(1, 0, 0),   # east
+    5: Vec3(-1, 0, 0),  # west
+}
+
+
+def get_target_face(max_distance: int = 12):
+    """Return the face position and normal the player is currently looking at.
+
+    The ray is traced from the camera for ``max_distance`` units in steps of
+    0.5. The function checks faces inside the current chunk as well as across
+    neighbouring chunks. This is a lightweight workaround for block selection
+    without using colliders.
+    """
+
+    origin = camera.world_position
+    direction = camera.forward
+
+    for i in range(int(max_distance * 2)):
+        step = i * 0.5
+        point = origin + direction * step
+
+        chunk_key = f"{int(point.x // chunk_size)}{int(point.z // chunk_size)}"
+        if chunk_key not in chunk_net:
+            continue
+
+        chunk_idx = chunk_net.index(chunk_key)
+        _, faces, face_indices = all_chunks[chunk_idx]
+
+        closest_face = None
+        closest_idx = None
+        min_dist = 0.6
+        for idx, fp in enumerate(faces):
+            d = distance(fp, point)
+            if d < min_dist:
+                min_dist = d
+                closest_face = fp
+                closest_idx = face_indices[idx]
+
+        if closest_face is not None:
+            normal = _FACE_NORMALS.get(closest_idx, Vec3(0, 1, 0))
+            return closest_face, normal
+
+    return None, None
+
 def update():
     global mode
     if mode==0:
@@ -87,7 +137,11 @@ def update():
 
         except:
             pass
-    c2.position = floor(player.position + player.forward * 4)
+    face_pos, _ = get_target_face()
+    if face_pos:
+        c2.position = face_pos
+    else:
+        c2.position = floor(player.position + player.forward * 4)
 
 
 #chunk_net=["00","01","02","03","10","11","12","13","20","21","22","23","30","31","32","33"]
@@ -281,32 +335,17 @@ def input(key):
         c.y=-9999
         save=0
     if key=="right mouse down" or key=="5":
-        l = []
-        print(str(str(int(c2.x // chunk_size)) + str(int(c2.z // chunk_size))))
-        #print(cint)
-        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_net.index(str(str(round(c2.x // chunk_size)) + str(round(c2.z // chunk_size))))]
-        try:
-            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                    round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
-        except:pass
-        c.position=q
-        save=1
+        face_pos, normal = get_target_face()
+        if face_pos:
+            c.position = Vec3(face_pos) + normal + Vec3(0, 0.5, 0)
+            save = 1
     #if save==3 and mouse.hovered_entity==c:
 
     if key=="left mouse down":
-        l = []
-        chunk_faces,chunk_faces2,chunk_faces3=all_chunks[chunk_net.index(str(str(round(c2.x//chunk_size))+str(round(c2.z//chunk_size))))]
-        try:
-            q = (chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][0],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][1],chunk_faces2[chunk_faces.index([round((player.forward[0]) * 4 + player.x),
-                                                round((player.forward[2]) * 4 + player.z)])][2]) + (0, 0.5, 0)
-        except:
-            pass
-        c.position = q
-        save = 2
+        face_pos, normal = get_target_face()
+        if face_pos:
+            c.position = Vec3(face_pos) + Vec3(0, 0.5, 0)
+            save = 2
 #        except:
 #            pass
     if key=="up arrow":
