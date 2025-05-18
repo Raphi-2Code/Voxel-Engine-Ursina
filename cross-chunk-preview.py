@@ -231,8 +231,9 @@ def mine():
     affected_chunks = {}
     affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
 
+    base_pos = Vec3(c.position) + Vec3(0, -1.5, 0)
     for cube_face in cube_faces2:
-        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -2.5, 0)
+        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + base_pos
 
         face_chunk_x = int(pos___[0] // chunk_size)
         face_chunk_z = int(pos___[2] // chunk_size)
