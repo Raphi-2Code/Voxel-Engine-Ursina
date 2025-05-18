@@ -1,6 +1,6 @@
 # Voxel Engine Test
 
-Codex, the AI coding agent by OpenAI helped me adding the advanced block placement system. I'm pretty impressed by this AI. Go to chatgpt.com/codex (requires a Teams subscription $25/mo or a Pro subscription $200/mo. You can also run Codex CLI locally via an API key.
+Codex, the AI coding agent by OpenAI helped me adding the advanced block placement system. I'm pretty impressed by this AI. Go to chatgpt.com/codex (requires a Teams subscription $25/mo, a Pro subscription $200/mo or an Enterprise subscription). You can also run Codex CLI locally via an API key.
 
 
 ![image](https://github.com/user-attachments/assets/db7e8cd7-e8c4-4677-9d40-0381433d305b)
