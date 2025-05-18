@@ -224,27 +224,32 @@ def build():
 
 
 def mine():
+    """Remove a block at the cursor position and expose neighboring faces."""
+
     global all_chunks, p, chunk_net, chunk_size, terrains, combined_terrains, texture
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
 
-    affected_chunks = {}
-    affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
+    base_pos = Vec3(c.position) + Vec3(0, -1.5, 0)
 
-    for cube_face in cube_faces2:
-        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -2.5, 0)
+    # Mapping from the current face index to the opposite one on the neighbor
+    opposite_face = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4}
 
-        face_chunk_x = int(pos___[0] // chunk_size)
-        face_chunk_z = int(pos___[2] // chunk_size)
-        face_chunk_key = f"{face_chunk_x}{face_chunk_z}"
+    affected_chunks: dict[int, dict[str, list]] = {}
+    affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}
 
-        if face_chunk_key in chunk_net:
-            face_chunk_idx = chunk_net.index(face_chunk_key)
+    for idx, cube_face in enumerate(cube_faces):
+        pos = Vec3(cube_face[0], cube_face[1], cube_face[2]) + base_pos
 
-            if face_chunk_idx not in affected_chunks:
-                affected_chunks[face_chunk_idx] = {"faces": [], "to_remove": [], "to_add": []}
+        face_chunk_key = f"{int(pos[0] // chunk_size)}{int(pos[2] // chunk_size)}"
+        if face_chunk_key not in chunk_net:
+            continue
 
-            affected_chunks[face_chunk_idx]["faces"].append((pos___, cube_face))
+        face_chunk_idx = chunk_net.index(face_chunk_key)
+        if face_chunk_idx not in affected_chunks:
+            affected_chunks[face_chunk_idx] = {"faces": [], "to_remove": [], "to_add": []}
+
+        affected_chunks[face_chunk_idx]["faces"].append((pos, idx))
 
     for chunk_idx, data in affected_chunks.items():
         chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_idx]
@@ -255,12 +260,11 @@ def mine():
         new_chunk_faces2 = []
         new_chunk_faces3 = []
 
-        for pos___, cube_face in data["faces"]:
-            if pos___ in chunk_faces2:
-                cpos = chunk_faces2.index(pos___)
-                data["to_remove"].append(pos___)
+        for pos__, face_idx in data["faces"]:
+            if pos__ in chunk_faces2:
+                data["to_remove"].append(pos__)
             else:
-                data["to_add"].append((pos___, cube_faces2.index(cube_face)))
+                data["to_add"].append((pos__, opposite_face[face_idx]))
 
         pll = 0
         for element in chunk_faces2:
