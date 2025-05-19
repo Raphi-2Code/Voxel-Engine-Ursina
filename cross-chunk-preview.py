@@ -206,7 +206,7 @@ def build():
         all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
 
         if hasattr(terrains[chunk_idx], 'disable'):
-            terrains[chunk_idx].disable()
+            destroy(terrains[chunk_idx])#.disable()
 
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
@@ -284,12 +284,13 @@ def mine():
 
         p = terrain2.combine()
         if hasattr(terrains[chunk_idx], 'disable'):
-            terrains[chunk_idx].disable()
+            destroy(terrains[chunk_idx])#.disable()
         terrains[chunk_idx] = terrain2
         combined_terrains[chunk_idx] = p
         terrain2.texture = texture
 
     c.y = -9999
+
 
 
 
