@@ -147,6 +147,25 @@ chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]
 count=0
 
 
+def _cube_exists_at(base_pos: Vec3) -> bool:
+    """Return True if all faces of the cube at *base_pos* exist.
+
+    The mining system assumes that a full cube is present before it can be
+    removed. If any face is missing we consider the cube invalid for mining.
+    """
+    for cube_face in cube_faces2:
+        face_pos = Vec3(cube_face[0], cube_face[1], cube_face[2]) + base_pos + Vec3(0, -2.5, 0)
+        face_chunk_x = int(face_pos[0] // chunk_size)
+        face_chunk_z = int(face_pos[2] // chunk_size)
+        face_chunk_key = f"{face_chunk_x}{face_chunk_z}"
+        if face_chunk_key not in chunk_net:
+            return False
+        chunk_idx = chunk_net.index(face_chunk_key)
+        if face_pos not in all_chunks[chunk_idx][1]:
+            return False
+    return True
+
+
 def build():
     global all_chunks, c, chunk_net, chunk_size, terrains, combined_terrains, texture
 
@@ -227,6 +246,11 @@ def mine():
     global all_chunks, p, chunk_net, chunk_size, terrains, combined_terrains, texture
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
+
+    if not _cube_exists_at(Vec3(c.position)):
+        print("u can't mine here")
+        c.y = -9999
+        return
 
     affected_chunks = {}
     affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
