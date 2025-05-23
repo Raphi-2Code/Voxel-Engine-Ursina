@@ -210,40 +210,50 @@ def input(key):
         save=0
     if save==2:
         if mouse.hovered_entity==c:
-            p.clear()
-            destroy(terrain)
-            terrain2 = Entity()
+            valid = True
             for cube_face in cube_faces2:
-                pos___=Vec3(cube_face[0],cube_face[1],cube_face[2])+Vec3(c.position)+Vec3(0,-2.5,0)
-                if pos___ in chunk_faces2:
-                    cpos=chunk_faces2.index(pos___)
-                    chunk_faces3.pop(cpos)
-                    chunk_faces2.pop(cpos)
-                    chunk_faces.pop(cpos)
-                else:
-                    chunk_faces2.append(pos___)
-                    chunk_faces.append([pos___[0],pos___[2]])
-                    chunk_faces3.append(cube_faces2.index(cube_face))
-            new_chunk_faces=[]
-            new_chunk_faces2=[]
-            new_chunk_faces3=[]
-            pll=0
-            for element in chunk_faces2:
-                elem = cube_faces[chunk_faces3[pll]]
-                pos_i = Vec3(element[0], element[1], element[2])
-                rot_i = Vec3(elem[3], elem[4], elem[5])
-                face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
-                # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
-                new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
-                new_chunk_faces.append([pos_i[0], pos_i[2]])
-                new_chunk_faces3.append(chunk_faces3[pll])
-                pll += 1
-            print(pll,len(chunk_faces))
-            chunk_faces2=new_chunk_faces2
-            chunk_faces3=new_chunk_faces3
-            chunk_faces=new_chunk_faces
-            p=terrain2.combine()
-            terrain2.texture="sand"
+                check_pos = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -1.5, 0)
+                if check_pos not in chunk_faces2:
+                    valid = False
+                    break
+
+            if not valid:
+                print("u can't mine here")
+            else:
+                p.clear()
+                destroy(terrain)
+                terrain2 = Entity()
+                for cube_face in cube_faces2:
+                    pos___=Vec3(cube_face[0],cube_face[1],cube_face[2])+Vec3(c.position)+Vec3(0,-1.5,0)
+                    if pos___ in chunk_faces2:
+                        cpos=chunk_faces2.index(pos___)
+                        chunk_faces3.pop(cpos)
+                        chunk_faces2.pop(cpos)
+                        chunk_faces.pop(cpos)
+                    else:
+                        chunk_faces2.append(pos___)
+                        chunk_faces.append([pos___[0],pos___[2]])
+                        chunk_faces3.append(cube_faces2.index(cube_face))
+                new_chunk_faces=[]
+                new_chunk_faces2=[]
+                new_chunk_faces3=[]
+                pll=0
+                for element in chunk_faces2:
+                    elem = cube_faces[chunk_faces3[pll]]
+                    pos_i = Vec3(element[0], element[1], element[2])
+                    rot_i = Vec3(elem[3], elem[4], elem[5])
+                    face = Entity(model="plane", position=pos_i, rotation=rot_i, parent=terrain2)
+                    # if chunk_faces3[pll]!=2 and chunk_faces3[pll]!=3:
+                    new_chunk_faces2.append((pos_i[0], pos_i[1], pos_i[2]))
+                    new_chunk_faces.append([pos_i[0], pos_i[2]])
+                    new_chunk_faces3.append(chunk_faces3[pll])
+                    pll += 1
+                print(pll,len(chunk_faces))
+                chunk_faces2=new_chunk_faces2
+                chunk_faces3=new_chunk_faces3
+                chunk_faces=new_chunk_faces
+                p=terrain2.combine()
+                terrain2.texture="sand"
         c.y=-9999
         save=0
     if key=="right mouse down":
