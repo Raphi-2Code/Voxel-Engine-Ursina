@@ -69,7 +69,6 @@ all_chunks=get_from_server_and_render()
 try:player.y = all_chunks[1][all_chunks[0].index([round(player.x * 2) / 2, round(player.z * 2) / 2])][1]
 except:pass
 mode=1
-save=0
 q=(0,-9999,0)
 c=Entity(model="cube",color=color.clear,collider="box")
 c2=Entity(model="cube",texture="frame")
@@ -243,74 +242,46 @@ def build():
 
 
 def mine():
-    global all_chunks, p, chunk_net, chunk_size, terrains, combined_terrains, texture
+    global all_chunks, chunk_net, chunk_size, terrains, combined_terrains, texture
 
-    cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
+    base_pos = Vec3(c.position) + Vec3(0, -1.5, 0)
 
-    if not _cube_exists_at(Vec3(c.position)):
-        print("u can't mine here")
-        c.y = -9999
-        return
+    affected_faces = {}
+    for idx, cube_face in enumerate(cube_faces2):
+        face_pos = Vec3(cube_face[0], cube_face[1], cube_face[2]) + base_pos
+        chunk_key = f"{int(face_pos[0] // chunk_size)}{int(face_pos[2] // chunk_size)}"
+        if chunk_key not in chunk_net:
+            continue
+        chunk_idx = chunk_net.index(chunk_key)
+        affected_faces.setdefault(chunk_idx, []).append(face_pos)
 
-    affected_chunks = {}
-    affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
-
-    for cube_face in cube_faces2:
-        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -1.5, 0)
-
-        face_chunk_x = int(pos___[0] // chunk_size)
-        face_chunk_z = int(pos___[2] // chunk_size)
-        face_chunk_key = f"{face_chunk_x}{face_chunk_z}"
-
-        if face_chunk_key in chunk_net:
-            face_chunk_idx = chunk_net.index(face_chunk_key)
-
-            if face_chunk_idx not in affected_chunks:
-                affected_chunks[face_chunk_idx] = {"faces": [], "to_remove": [], "to_add": []}
-
-            affected_chunks[face_chunk_idx]["faces"].append((pos___, cube_face))
-
-    for chunk_idx, data in affected_chunks.items():
+    for chunk_idx, faces in affected_faces.items():
         chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_idx]
-
-        combined_terrains[chunk_idx].clear()
 
         new_chunk_faces = []
         new_chunk_faces2 = []
         new_chunk_faces3 = []
 
-        for pos___, cube_face in data["faces"]:
-            if pos___ in chunk_faces2:
-                cpos = chunk_faces2.index(pos___)
-                data["to_remove"].append(pos___)
-            else:
-                data["to_add"].append((pos___, cube_faces2.index(cube_face)))
-
-        pll = 0
-        for element in chunk_faces2:
-            if element not in data["to_remove"]:
-                new_chunk_faces2.append(element)
-                new_chunk_faces.append([element[0], element[2]])
-                new_chunk_faces3.append(chunk_faces3[pll])
-            pll += 1
-
-        for face_pos, face_idx in data["to_add"]:
-            new_chunk_faces2.append(face_pos)
-            new_chunk_faces.append([face_pos[0], face_pos[2]])
-            new_chunk_faces3.append(face_idx)
+        for i, face_pos in enumerate(chunk_faces2):
+            if face_pos not in faces:
+                new_chunk_faces2.append(face_pos)
+                new_chunk_faces.append([face_pos[0], face_pos[2]])
+                new_chunk_faces3.append(chunk_faces3[i])
 
         all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
 
+        if hasattr(terrains[chunk_idx], 'disable'):
+            destroy(terrains[chunk_idx])
+
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
-            face = Entity(model="plane", position=face_pos,
-                          rotation=(cube_faces[new_chunk_faces3[i]][3],cube_faces[new_chunk_faces3[i]][4],cube_faces[new_chunk_faces3[i]][5]), parent=terrain2)
+            Entity(model="plane", position=face_pos,
+                   rotation=(cube_faces[new_chunk_faces3[i]][3], cube_faces[new_chunk_faces3[i]][4], cube_faces[new_chunk_faces3[i]][5]),
+                   parent=terrain2)
 
-        p = terrain2.combine()
-        if hasattr(terrains[chunk_idx], 'disable'):
-            destroy(terrains[chunk_idx])#.disable()
+        combined = terrain2.combine()
         terrains[chunk_idx] = terrain2
-        combined_terrains[chunk_idx] = p
+        combined_terrains[chunk_idx] = combined
         terrain2.texture = texture
 
     c.y = -9999
@@ -321,7 +292,7 @@ def mine():
 player.speed=20
 print(len(all_chunks))
 def input(key):
-    global p,mode,save,q,count
+    global p,mode,q,count
     if key=="g":
         if len(p.vertices)!=0:
             p_verts=p.vertices
@@ -340,30 +311,19 @@ def input(key):
         player.y+=1
     if key=="l":
         player.y-=1
-    if save==1:
-        if mouse.hovered_entity == c:
-            build()
-        else:c.y=-9999
-        save=0
-    if save==2:
-        if mouse.hovered_entity==c:
-            mine()
-        c.y=-9999
-        save=0
     if key=="right mouse down" or key=="5":
         face_pos, normal, face_idx = get_target_face()
         if face_pos:
             base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 1
-    #if save==3 and mouse.hovered_entity==c:
+            build()
 
     if key=="left mouse down" or key=="4":
         face_pos, normal, face_idx = get_target_face()
         if face_pos:
             base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 2
+            mine()
 #        except:
 #            pass
     if key=="up arrow":
