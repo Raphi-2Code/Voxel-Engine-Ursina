@@ -2,7 +2,7 @@
 
 performance fix xd
 
-Oops! The mining system is not working. Fixing it when I have time to. + performance drop when mining
+A basic cross-chunk mining system is implemented in `cross-chunk-preview.py`, though performance may drop when mining
 
 Codex, the AI coding agent by OpenAI helped me adding the advanced block placement system. I'm pretty impressed by this AI. Go to chatgpt.com/codex (requires a Teams subscription $25/mo, a Pro subscription $200/mo or an Enterprise subscription). You can also run Codex CLI locally via an API key.
 

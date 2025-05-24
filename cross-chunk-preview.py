@@ -69,7 +69,6 @@ all_chunks=get_from_server_and_render()
 try:player.y = all_chunks[1][all_chunks[0].index([round(player.x * 2) / 2, round(player.z * 2) / 2])][1]
 except:pass
 mode=1
-save=0
 q=(0,-9999,0)
 c=Entity(model="cube",color=color.clear,collider="box")
 c2=Entity(model="cube",texture="frame")
@@ -321,7 +320,7 @@ def mine():
 player.speed=20
 print(len(all_chunks))
 def input(key):
-    global p,mode,save,q,count
+    global p,mode,q,count
     if key=="g":
         if len(p.vertices)!=0:
             p_verts=p.vertices
@@ -340,30 +339,19 @@ def input(key):
         player.y+=1
     if key=="l":
         player.y-=1
-    if save==1:
-        if mouse.hovered_entity == c:
-            build()
-        else:c.y=-9999
-        save=0
-    if save==2:
-        if mouse.hovered_entity==c:
-            mine()
-        c.y=-9999
-        save=0
     if key=="right mouse down" or key=="5":
         face_pos, normal, face_idx = get_target_face()
         if face_pos:
             base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 1
-    #if save==3 and mouse.hovered_entity==c:
+            build()
 
     if key=="left mouse down" or key=="4":
         face_pos, normal, face_idx = get_target_face()
         if face_pos:
             base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 2
+            mine()
 #        except:
 #            pass
     if key=="up arrow":
