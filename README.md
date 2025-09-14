@@ -1,5 +1,7 @@
 # Voxel Engine Test
 
+Performance fix! Now let's wait for the working mining system.
+
 Performance fix version soon! 14/09/2025
 
 Oops! The mining system is not working. Fixing it when I have time to. + performance drop when mining
