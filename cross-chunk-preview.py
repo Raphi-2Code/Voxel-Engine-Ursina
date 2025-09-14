@@ -147,25 +147,6 @@ chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]
 count=0
 
 
-def _cube_exists_at(base_pos: Vec3) -> bool:
-    """Return True if all faces of the cube at *base_pos* exist.
-
-    The mining system assumes that a full cube is present before it can be
-    removed. If any face is missing we consider the cube invalid for mining.
-    """
-    for cube_face in cube_faces2:
-        face_pos = Vec3(cube_face[0], cube_face[1], cube_face[2]) + base_pos + Vec3(0, -1.5, 0)
-        face_chunk_x = int(face_pos[0] // chunk_size)
-        face_chunk_z = int(face_pos[2] // chunk_size)
-        face_chunk_key = f"{face_chunk_x}{face_chunk_z}"
-        if face_chunk_key not in chunk_net:
-            return False
-        chunk_idx = chunk_net.index(face_chunk_key)
-        if face_pos not in all_chunks[chunk_idx][1]:
-            return False
-    return True
-
-
 def build():
     global all_chunks, c, chunk_net, chunk_size, terrains, combined_terrains, texture
 
@@ -224,14 +205,13 @@ def build():
 
         all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
 
-        if hasattr(terrains[chunk_idx], 'disable'):
-            destroy(terrains[chunk_idx])#.disable()
-
+        terrains[chunk_idx].clear()
+        destroy(terrains[chunk_idx])
         terrain2 = Entity()
         for i, face_pos in enumerate(new_chunk_faces2):
             Entity(model="plane", position=face_pos,
                    rotation=(cube_faces[new_chunk_faces3[i]][3], cube_faces[new_chunk_faces3[i]][4], cube_faces[new_chunk_faces3[i]][5]),
-                   parent=terrain2)
+                   parent=terrain2, color=color.brown)
 
         combined_entity = terrain2.combine()
         terrains[chunk_idx] = terrain2
@@ -247,16 +227,11 @@ def mine():
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
 
-    if not _cube_exists_at(Vec3(c.position)):
-        print("u can't mine here")
-        c.y = -9999
-        return
-
     affected_chunks = {}
     affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
 
     for cube_face in cube_faces2:
-        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -1.5, 0)
+        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -2.5, 0)
 
         face_chunk_x = int(pos___[0] // chunk_size)
         face_chunk_z = int(pos___[2] // chunk_size)
@@ -307,14 +282,14 @@ def mine():
                           rotation=(cube_faces[new_chunk_faces3[i]][3],cube_faces[new_chunk_faces3[i]][4],cube_faces[new_chunk_faces3[i]][5]), parent=terrain2)
 
         p = terrain2.combine()
-        if hasattr(terrains[chunk_idx], 'disable'):
-            destroy(terrains[chunk_idx])#.disable()
+        #if hasattr(terrains[chunk_idx], 'disable'):
+        terrains[chunk_idx].clear()
+        destroy(terrains[chunk_idx])
         terrains[chunk_idx] = terrain2
         combined_terrains[chunk_idx] = p
         terrain2.texture = texture
 
     c.y = -9999
-
 
 
 
@@ -358,12 +333,13 @@ def input(key):
             save = 1
     #if save==3 and mouse.hovered_entity==c:
 
-    if key=="left mouse down" or key=="4":
+    if key in ("left mouse down", "4"):
         face_pos, normal, face_idx = get_target_face()
         if face_pos:
             base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 2
+            mine()            # do it immediately
+            c.y = -9999       # hide ghost
 #        except:
 #            pass
     if key=="up arrow":
