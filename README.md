@@ -1,6 +1,7 @@
 # Voxel Engine Test
 
 Performance fix! Now let's wait for the working mining system.
+wait, did i add ther cursor again? let's look into it later
 
 Performance fix version soon! 14/09/2025
 
