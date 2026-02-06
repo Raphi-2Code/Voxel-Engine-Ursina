@@ -1,4 +1,3 @@
-#
 from ursina import *
 from panda3d.core import LVecBase3f
 from ursina.prefabs.first_person_controller import *
@@ -39,7 +38,7 @@ xpos = 0
 zpos = 0
 chunk_size = 16
 combined_terrains=[]
-terrains=[]
+
 def get_from_server_and_render():
     chunks_opened_=list(eval(open('chunks.txt','r').read()))
     for chunks_opened in chunks_opened_:
@@ -62,8 +61,10 @@ def get_from_server_and_render():
         chunk_faces=[]
         chunk_faces3=[]
         p = terrain.combine()
+        terrain.clear()
+        destroy(terrain)
         combined_terrains.append(p)
-        terrains.append(terrain)
+
     return all_chunks
 all_chunks=get_from_server_and_render()
 #player.position=chunk_faces2[0]
@@ -149,7 +150,7 @@ count=0
 
 
 def build():
-    global all_chunks, c, chunk_net, chunk_size, terrains, combined_terrains, texture
+    global all_chunks, c, chunk_net, chunk_size, combined_terrains, texture
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
     chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[cint]
@@ -206,25 +207,27 @@ def build():
 
         all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
 
-        terrains[chunk_idx].clear()
-        destroy(terrains[chunk_idx])
-        terrain2 = Entity()
+        #terrains[chunk_idx].clear()
+        #destroy(terrains[chunk_idx])
+        terrain2 = Entity(texture="sand")
         for i, face_pos in enumerate(new_chunk_faces2):
             Entity(model="plane", position=face_pos,
                    rotation=(cube_faces[new_chunk_faces3[i]][3], cube_faces[new_chunk_faces3[i]][4], cube_faces[new_chunk_faces3[i]][5]),
                    parent=terrain2, color=color.brown)
 
         combined_entity = terrain2.combine()
-        terrains[chunk_idx] = terrain2
+        #terrains[chunk_idx] = terrain2
         combined_terrains[chunk_idx] = combined_entity
-        terrain2.texture = texture
+        combined_entity.texture = texture
+        terrain2.clear()
+        destroy(terrain2)
 
     c.y = -9999
 
 
 
 def mine():
-    global all_chunks, p, chunk_net, chunk_size, terrains, combined_terrains, texture
+    global all_chunks, p, chunk_net, chunk_size, combined_terrains, texture
 
     cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
 
@@ -284,11 +287,13 @@ def mine():
 
         p = terrain2.combine()
         #if hasattr(terrains[chunk_idx], 'disable'):
-        terrains[chunk_idx].clear()
+        #terrains[chunk_idx].clear()
         destroy(terrains[chunk_idx])
-        terrains[chunk_idx] = terrain2
+        #terrains[chunk_idx] = terrain2
         combined_terrains[chunk_idx] = p
-        terrain2.texture = texture
+        p.texture = texture
+        terrain2.clear()
+        destroy(terrain2)
 
     c.y = -9999
 
