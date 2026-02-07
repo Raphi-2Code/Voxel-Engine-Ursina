@@ -5,6 +5,7 @@ from perlin_noise import *
 from itertools import *
 import math
 import numpy as np
+from bisect import bisect_left, bisect_right
 
 app = Ursina()
 player = FirstPersonController(gravity=0)
@@ -41,6 +42,13 @@ combined_terrains = [None for _ in chunk_keys]
 world_faces = set()                            # union of all chunk_face_sets
 face_to_chunk = {}                             # ((x,y,z), face_idx) -> chunk_idx
 
+# Block-derived acceleration structure for collider-free FPS gravity.
+# We infer each visible block from any visible face, then index its top y.
+# top_columns[(x,z)] -> sorted [top_y1, top_y2, ...]
+# top_cells[(floor(x), floor(z))] -> {(x,z), ...} for fast local lookup.
+top_columns = {}
+top_cells = {}
+block_face_counts = {}                         # (base_x, base_y, base_z) -> visible face count
 
 
 mode = 1
@@ -63,6 +71,29 @@ _OPPOSITE_FACE = {
     2: 3, 3: 2,
     4: 5, 5: 4,
 }
+
+# Collider-free gravity settings.
+GRAVITY_ACCEL = 35.0
+MAX_FALL_SPEED = 55.0
+JUMP_SPEED = 11.5
+# In Ursina's FirstPersonController, player.y is already at foot/ground level.
+PLAYER_STAND_HEIGHT = 0.0
+GROUND_STICK = 0.08
+MAX_STEP_UP = 0.35
+PLAYER_COLLISION_RADIUS = 0.33
+PLAYER_FOOT_RADIUS = PLAYER_COLLISION_RADIUS
+PLAYER_COLLISION_FOOT_CLEARANCE = 0.02
+PLAYER_COLLISION_HEAD_CLEARANCE = 0.1
+BLOCK_HALF_EXTENT = 0.5
+BLOCK_HEIGHT = float(_FACE_OFFSETS[1].y - _FACE_OFFSETS[0].y)
+WALL_EPS = 0.001
+MAX_PHYSICS_SUBSTEP = 1.0 / 120.0
+MAX_PHYSICS_STEPS = 8
+
+vertical_velocity = 0.0
+is_grounded = False
+prev_horizontal_x = None
+prev_horizontal_z = None
 
 
 class Perlin:
@@ -100,6 +131,7 @@ def _chunk_coord_from_pos(pos):
     cx = math.floor(float(pos[0]) / chunk_size)
     cz = math.floor(float(pos[2]) / chunk_size)
     return (cx, cz)
+
 
 def _chunk_index_from_pos(pos):
     return chunk_index.get(_chunk_coord_from_pos(pos))
@@ -145,7 +177,6 @@ def _rebuild_chunk_mesh(chunk_idx):
             position=fp,
             rotation=_face_rotation(fidx),
             parent=terrain,
-            # rote Farbe color=color.brown,
         )
 
     combined = terrain.combine()
@@ -167,6 +198,366 @@ def _refresh_chunks(affected_chunks):
         _rebuild_chunk_mesh(chunk_idx)
 
 
+def _cube_base_from_face(pos_key, face_idx):
+    off = _FACE_OFFSETS[int(face_idx)]
+    return _vkey((pos_key[0] - off.x, pos_key[1] - off.y, pos_key[2] - off.z))
+
+
+def _register_top_face(pos_key, face_idx):
+    base = _cube_base_from_face(pos_key, face_idx)
+    prev = block_face_counts.get(base, 0)
+    block_face_counts[base] = prev + 1
+    if prev > 0:
+        return
+
+    x, yb, z = base
+    y_top = round(yb + _FACE_OFFSETS[1].y, 4)
+    col = (x, z)
+
+    ys = top_columns.setdefault(col, [])
+    idx = bisect_left(ys, y_top)
+    if idx >= len(ys) or ys[idx] != y_top:
+        ys.insert(idx, y_top)
+
+    cell = (math.floor(x), math.floor(z))
+    top_cells.setdefault(cell, set()).add(col)
+
+
+def _unregister_top_face(pos_key, face_idx):
+    base = _cube_base_from_face(pos_key, face_idx)
+    prev = block_face_counts.get(base, 0)
+    if prev == 0:
+        return
+    if prev > 1:
+        block_face_counts[base] = prev - 1
+        return
+    block_face_counts.pop(base, None)
+
+    x, yb, z = base
+    y_top = round(yb + _FACE_OFFSETS[1].y, 4)
+    col = (x, z)
+
+    ys = top_columns.get(col)
+    if not ys:
+        return
+    idx = bisect_left(ys, y_top)
+    if idx >= len(ys) or ys[idx] != y_top:
+        return
+    ys.pop(idx)
+
+    if ys:
+        return
+
+    top_columns.pop(col, None)
+    cell = (math.floor(x), math.floor(z))
+    cols = top_cells.get(cell)
+    if cols is None:
+        return
+    cols.discard(col)
+    if len(cols) == 0:
+        top_cells.pop(cell, None)
+
+
+def _find_support_y(px, pz, foot_y, max_up):
+    reach = 0.5 + PLAYER_FOOT_RADIUS
+    best = None
+    ceiling = foot_y + max_up
+
+    min_cx = math.floor(px - reach)
+    max_cx = math.floor(px + reach)
+    min_cz = math.floor(pz - reach)
+    max_cz = math.floor(pz + reach)
+
+    for cx in range(min_cx, max_cx + 1):
+        for cz in range(min_cz, max_cz + 1):
+            cols = top_cells.get((cx, cz))
+            if not cols:
+                continue
+            for col in cols:
+                x, z = col
+                if abs(px - x) > reach or abs(pz - z) > reach:
+                    continue
+                ys = top_columns.get(col)
+                if not ys:
+                    continue
+                idx = bisect_right(ys, ceiling)
+                if idx == 0:
+                    continue
+                y = ys[idx - 1]
+                if best is None or y > best:
+                    best = y
+
+    return best
+
+
+def _find_support_y_fallback(px, pz, foot_y, max_up):
+    # Safety net: scan inferred blocks directly if fast cell index misses.
+    # This is still math-based and avoids colliders/raycast collision checks.
+    reach = 0.5 + PLAYER_FOOT_RADIUS
+    best = None
+    ceiling = foot_y + max_up
+    top_off = _FACE_OFFSETS[1].y
+
+    for base in block_face_counts.keys():
+        x, yb, z = base
+        if abs(px - x) > reach or abs(pz - z) > reach:
+            continue
+        y_top = round(yb + top_off, 4)
+        if y_top > ceiling:
+            continue
+        if best is None or y_top > best:
+            best = y_top
+
+    return best
+
+
+def _player_body_y_span():
+    y_min = float(player.y) + PLAYER_COLLISION_FOOT_CLEARANCE
+    y_max = float(player.y) + float(player.height) - PLAYER_COLLISION_HEAD_CLEARANCE
+    return y_min, y_max
+
+
+def _iter_candidate_columns(min_x, max_x, min_z, max_z):
+    seen = set()
+    min_cx = math.floor(min_x)
+    max_cx = math.floor(max_x)
+    min_cz = math.floor(min_z)
+    max_cz = math.floor(max_z)
+
+    for cx in range(min_cx, max_cx + 1):
+        for cz in range(min_cz, max_cz + 1):
+            cols = top_cells.get((cx, cz))
+            if not cols:
+                continue
+            for col in cols:
+                if col in seen:
+                    continue
+                seen.add(col)
+                x, z = col
+                if x + BLOCK_HALF_EXTENT <= min_x or x - BLOCK_HALF_EXTENT >= max_x:
+                    continue
+                if z + BLOCK_HALF_EXTENT <= min_z or z - BLOCK_HALF_EXTENT >= max_z:
+                    continue
+                ys = top_columns.get(col)
+                if ys:
+                    yield col, ys
+
+
+def _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+    for col, ys in _iter_candidate_columns(min_x, max_x, min_z, max_z):
+        x, z = col
+        bx0 = x - BLOCK_HALF_EXTENT
+        bx1 = x + BLOCK_HALF_EXTENT
+        bz0 = z - BLOCK_HALF_EXTENT
+        bz1 = z + BLOCK_HALF_EXTENT
+        for y_top in ys:
+            by1 = y_top
+            by0 = y_top - BLOCK_HEIGHT
+            if y_max < by0 or y_min > by1:
+                continue
+            yield bx0, bx1, bz0, bz1
+
+
+def _sweep_x(start_x, target_x, z, y_min, y_max):
+    dx = target_x - start_x
+    if abs(dx) < 1e-8:
+        return target_x
+
+    radius = PLAYER_COLLISION_RADIUS
+    min_x = min(start_x, target_x) - radius
+    max_x = max(start_x, target_x) + radius
+    min_z = z - radius
+    max_z = z + radius
+
+    if dx > 0:
+        limit = target_x
+        for bx0, bx1, bz0, bz1 in _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+            if max_z <= bz0 or min_z >= bz1:
+                continue
+            boundary = bx0 - radius
+            if start_x <= boundary and target_x > boundary and boundary < limit:
+                limit = boundary - WALL_EPS
+        return limit
+
+    limit = target_x
+    for bx0, bx1, bz0, bz1 in _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+        if max_z <= bz0 or min_z >= bz1:
+            continue
+        boundary = bx1 + radius
+        if start_x >= boundary and target_x < boundary and boundary > limit:
+            limit = boundary + WALL_EPS
+    return limit
+
+
+def _sweep_z(start_z, target_z, x, y_min, y_max):
+    dz = target_z - start_z
+    if abs(dz) < 1e-8:
+        return target_z
+
+    radius = PLAYER_COLLISION_RADIUS
+    min_x = x - radius
+    max_x = x + radius
+    min_z = min(start_z, target_z) - radius
+    max_z = max(start_z, target_z) + radius
+
+    if dz > 0:
+        limit = target_z
+        for bx0, bx1, bz0, bz1 in _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+            if max_x <= bx0 or min_x >= bx1:
+                continue
+            boundary = bz0 - radius
+            if start_z <= boundary and target_z > boundary and boundary < limit:
+                limit = boundary - WALL_EPS
+        return limit
+
+    limit = target_z
+    for bx0, bx1, bz0, bz1 in _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+        if max_x <= bx0 or min_x >= bx1:
+            continue
+        boundary = bz1 + radius
+        if start_z >= boundary and target_z < boundary and boundary > limit:
+            limit = boundary + WALL_EPS
+    return limit
+
+
+def _resolve_horizontal_penetration(px, pz, y_min, y_max):
+    radius = PLAYER_COLLISION_RADIUS
+
+    for _ in range(4):
+        moved = False
+        min_x = px - radius
+        max_x = px + radius
+        min_z = pz - radius
+        max_z = pz + radius
+
+        for bx0, bx1, bz0, bz1 in _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
+            if max_x <= bx0 or min_x >= bx1 or max_z <= bz0 or min_z >= bz1:
+                continue
+
+            overlap_x = min(max_x - bx0, bx1 - min_x)
+            overlap_z = min(max_z - bz0, bz1 - min_z)
+            center_x = (bx0 + bx1) * 0.5
+            center_z = (bz0 + bz1) * 0.5
+
+            if overlap_x < overlap_z:
+                direction = -1.0 if px < center_x else 1.0
+                px += direction * (overlap_x + WALL_EPS)
+            else:
+                direction = -1.0 if pz < center_z else 1.0
+                pz += direction * (overlap_z + WALL_EPS)
+
+            moved = True
+            break
+
+        if not moved:
+            break
+
+    return px, pz
+
+
+def _apply_vector_horizontal_collisions():
+    global prev_horizontal_x, prev_horizontal_z
+
+    cur_x = float(player.x)
+    cur_z = float(player.z)
+
+    if prev_horizontal_x is None or prev_horizontal_z is None:
+        prev_horizontal_x = cur_x
+        prev_horizontal_z = cur_z
+        return
+
+    y_min, y_max = _player_body_y_span()
+    res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
+    res_z = _sweep_z(prev_horizontal_z, cur_z, res_x, y_min, y_max)
+    res_x, res_z = _resolve_horizontal_penetration(res_x, res_z, y_min, y_max)
+
+    player.x = res_x
+    player.z = res_z
+    prev_horizontal_x = float(player.x)
+    prev_horizontal_z = float(player.z)
+
+
+def _block_bounds_from_base(base):
+    x = float(base[0])
+    y = float(base[1])
+    z = float(base[2])
+    by0 = y + float(_FACE_OFFSETS[0].y)
+    by1 = y + float(_FACE_OFFSETS[1].y)
+    bx0 = x - BLOCK_HALF_EXTENT
+    bx1 = x + BLOCK_HALF_EXTENT
+    bz0 = z - BLOCK_HALF_EXTENT
+    bz1 = z + BLOCK_HALF_EXTENT
+    return bx0, bx1, by0, by1, bz0, bz1
+
+
+def _block_intersects_player(base):
+    bx0, bx1, by0, by1, bz0, bz1 = _block_bounds_from_base(base)
+    y_min, y_max = _player_body_y_span()
+
+    if y_max <= by0 or y_min >= by1:
+        return False
+
+    px = float(player.x)
+    pz = float(player.z)
+    closest_x = clamp(px, bx0, bx1)
+    closest_z = clamp(pz, bz0, bz1)
+    dx = px - closest_x
+    dz = pz - closest_z
+    return (dx * dx + dz * dz) <= (PLAYER_COLLISION_RADIUS * PLAYER_COLLISION_RADIUS)
+
+
+def _apply_vector_gravity():
+    global vertical_velocity, is_grounded
+    dt_total = time.dt
+    if dt_total <= 0:
+        return
+
+    steps = max(1, int(math.ceil(dt_total / MAX_PHYSICS_SUBSTEP)))
+    steps = min(steps, MAX_PHYSICS_STEPS)
+    dt = dt_total / steps
+
+    for _ in range(steps):
+        px = float(player.x)
+        pz = float(player.z)
+        current_foot = float(player.y) - PLAYER_STAND_HEIGHT
+
+        # While falling, scan farther up so we still catch top faces even if one frame
+        # already moved the feet below the surface.
+        support_scan_up = MAX_STEP_UP
+        if vertical_velocity < 0:
+            support_scan_up = MAX_STEP_UP + max(BLOCK_HEIGHT, (-vertical_velocity * dt) + 0.05)
+
+        support_y = _find_support_y(px, pz, current_foot, support_scan_up)
+        if support_y is None and len(block_face_counts) > 0:
+            support_y = _find_support_y_fallback(px, pz, current_foot, support_scan_up)
+
+        if support_y is not None and current_foot < support_y:
+            player.y = support_y + PLAYER_STAND_HEIGHT
+            vertical_velocity = 0.0
+            is_grounded = True
+            continue
+
+        if support_y is not None and vertical_velocity <= 0:
+            d = current_foot - support_y
+            if 0 <= d <= GROUND_STICK:
+                player.y = support_y + PLAYER_STAND_HEIGHT
+                vertical_velocity = 0.0
+                is_grounded = True
+                continue
+
+        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * dt, -MAX_FALL_SPEED)
+        next_y = float(player.y) + vertical_velocity * dt
+        next_foot = next_y - PLAYER_STAND_HEIGHT
+
+        if support_y is not None and vertical_velocity <= 0 and next_foot <= support_y:
+            player.y = support_y + PLAYER_STAND_HEIGHT
+            vertical_velocity = 0.0
+            is_grounded = True
+        else:
+            player.y = next_y
+            is_grounded = False
+
+
 def _remove_face(face_key, affected):
     if face_key not in world_faces:
         return False
@@ -177,6 +568,7 @@ def _remove_face(face_key, affected):
     world_faces.discard(face_key)
     face_to_chunk.pop(face_key, None)
     chunk_face_sets[chunk_idx].discard(face_key)
+    _unregister_top_face(face_key[0], face_key[1])
     affected.add(chunk_idx)
     return True
 
@@ -190,11 +582,20 @@ def _add_face(face_key, chunk_idx, affected):
     world_faces.add(face_key)
     face_to_chunk[face_key] = chunk_idx
     chunk_face_sets[chunk_idx].add(face_key)
+    _register_top_face(face_key[0], face_key[1])
     affected.add(chunk_idx)
     return True
 
 
 def load_chunks():
+    world_faces.clear()
+    face_to_chunk.clear()
+    top_columns.clear()
+    top_cells.clear()
+    block_face_counts.clear()
+    for i in range(len(chunk_face_sets)):
+        chunk_face_sets[i].clear()
+
     chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
 
     for chunk_idx, chunk_data in enumerate(chunks_opened_):
@@ -216,20 +617,40 @@ def load_chunks():
             world_faces.add(key)
             face_to_chunk[key] = chunk_idx
             chunk_face_sets[chunk_idx].add(key)
+            _register_top_face(key[0], key[1])
 
     for i in range(len(chunk_keys)):
         _sync_chunk_lists(i)
         _rebuild_chunk_mesh(i)
 
+    print(
+        f"[gravity] faces={len(world_faces)} blocks={len(block_face_counts)} columns={len(top_columns)}"
+    )
+    if len(world_faces) > 0 and len(block_face_counts) == 0:
+        # Last-resort rebuild in case an earlier load path skipped support indexing.
+        for face_key in world_faces:
+            _register_top_face(face_key[0], face_key[1])
+        print(
+            f"[gravity] rebuilt blocks={len(block_face_counts)} columns={len(top_columns)}"
+        )
+
 
 load_chunks()
 
 try:
-    # simple spawn near first face
-    first_face = next(iter(world_faces))
-    player.position = Vec3(first_face[0][0], first_face[0][1] + 2, first_face[0][2])
+    # simple spawn near first top face
+    if len(top_columns) > 0:
+        col = next(iter(top_columns.keys()))
+        y = top_columns[col][-1]
+        player.position = Vec3(col[0], y + PLAYER_STAND_HEIGHT, col[1])
+    else:
+        first_face = next(iter(world_faces))
+        player.position = Vec3(first_face[0][0], first_face[0][1] + 2, first_face[0][2])
 except:
     player.position = Vec3(0, 6, 0)
+
+prev_horizontal_x = float(player.x)
+prev_horizontal_z = float(player.z)
 
 
 def get_target_face(max_distance: int = 12):
@@ -266,6 +687,10 @@ def get_target_face(max_distance: int = 12):
 
 def build():
     cube_base = Vec3(c.position) + Vec3(0, -1.5, 0)
+    if _block_intersects_player(cube_base):
+        c.y = -9999
+        return
+
     affected = set()
 
     for i, off in enumerate(_FACE_OFFSETS):
@@ -310,6 +735,9 @@ def mine(face_pos=None, face_idx=None):
 
 
 def update():
+    _apply_vector_horizontal_collisions()
+    _apply_vector_gravity()
+
     face_pos, _, _ = get_target_face()
     if face_pos:
         c2.position = Vec3(round(face_pos[0]), round(face_pos[1]), round(face_pos[2])) + (0, -0.5, 0)
@@ -318,14 +746,19 @@ def update():
 
 
 def input(key):
-    global mode
+    global mode, vertical_velocity, is_grounded
 
     if key == "o":
         mode = 1 - mode
     if key == "m":
         player.y += 1
+        vertical_velocity = 0.0
     if key == "l":
         player.y -= 1
+        vertical_velocity = 0.0
+    if key == "space" and is_grounded:
+        vertical_velocity = JUMP_SPEED
+        is_grounded = False
     if key == "e":
         player.enabled = not player.enabled
         print(len(scene.entities))
