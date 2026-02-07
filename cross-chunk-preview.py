@@ -26,7 +26,83 @@ frequency = 8
 amplitude = 1
 
 chunk_size = 16
-texture = "sand"
+texture = "atlas"
+
+# Atlas setup (tile coordinates are from top-left).
+ATLAS_TILES_X = 4
+ATLAS_TILES_Y = 4
+ATLAS_BLEED = 0.0015
+# In Ursina/Panda the texture loader is usually already Y-flipped for UV space.
+# Keep this False by default; set True only if your atlas rows are vertically inverted.
+ATLAS_FLIP_Y = True
+DEFAULT_ATLAS_TILE = (0, 0)
+BLOCK_FACE_TILES = {
+    "grass": {
+        0: (2, 0),  # bottom dirt
+        1: (0, 0),  # top grass
+        2: (1, 0),  # side grass/dirt
+        3: (1, 0),
+        4: (1, 0),
+        5: (1, 0),
+    },
+    "stone": {
+        0: (3, 0),
+        1: (3, 0),
+        2: (3, 0),
+        3: (3, 0),
+        4: (3, 0),
+        5: (3, 0),
+    },
+    "sand": {
+        0: (0, 1),
+        1: (0, 1),
+        2: (0, 1),
+        3: (0, 1),
+        4: (0, 1),
+        5: (0, 1),
+    },
+    "planks": {
+        0: (1, 1),
+        1: (1, 1),
+        2: (1, 1),
+        3: (1, 1),
+        4: (1, 1),
+        5: (1, 1),
+    },
+    "leaves": {
+        0: (2, 1),
+        1: (2, 1),
+        2: (2, 1),
+        3: (2, 1),
+        4: (2, 1),
+        5: (2, 1),
+    },
+    "water": {
+        0: (3, 1),
+        1: (3, 1),
+        2: (3, 1),
+        3: (3, 1),
+        4: (3, 1),
+        5: (3, 1),
+    },
+}
+DEFAULT_BLOCK_TYPE = "grass"
+selected_block_type = DEFAULT_BLOCK_TYPE
+BLOCK_SELECT_KEYS = {
+    "1": "grass",
+    "2": "stone",
+    "3": "sand",
+    "6": "planks",
+    "7": "leaves",
+    "8": "water",
+}
+atlas_texture = load_texture(texture)
+if atlas_texture is not None:
+    try:
+        # Pixel look: no smoothing between texels.
+        atlas_texture.filtering = None
+    except:
+        pass
 
 GRID_X = 4
 GRID_Z = 4
@@ -41,6 +117,8 @@ combined_terrains = [None for _ in chunk_keys]
 
 world_faces = set()                            # union of all chunk_face_sets
 face_to_chunk = {}                             # ((x,y,z), face_idx) -> chunk_idx
+face_block_types = {}                          # ((x,y,z), face_idx) -> block type
+block_types = {}                               # (base_x, base_y, base_z) -> block type
 
 # Block-derived acceleration structure for collider-free FPS gravity.
 # We infer each visible block from any visible face, then index its top y.
@@ -127,6 +205,144 @@ def _face_rotation(face_idx):
     )
 
 
+def _normalize_block_type(block_type):
+    key = str(block_type)
+    if key in BLOCK_FACE_TILES:
+        return key
+    return DEFAULT_BLOCK_TYPE
+
+
+def _block_tile_for_face(block_type, face_idx):
+    btype = _normalize_block_type(block_type)
+    face_map = BLOCK_FACE_TILES.get(btype, {})
+    tile = face_map.get(int(face_idx))
+    if tile is None:
+        return DEFAULT_ATLAS_TILE
+    return tile
+
+
+def _atlas_rect(tile_x, tile_y):
+    tx = int(clamp(tile_x, 0, ATLAS_TILES_X - 1))
+    ty = int(clamp(tile_y, 0, ATLAS_TILES_Y - 1))
+
+    w = 1.0 / ATLAS_TILES_X
+    h = 1.0 / ATLAS_TILES_Y
+
+    uv_row = ty
+    if ATLAS_FLIP_Y:
+        uv_row = (ATLAS_TILES_Y - 1) - ty
+
+    u0 = tx * w + ATLAS_BLEED
+    v0 = uv_row * h + ATLAS_BLEED
+    u1 = (tx + 1) * w - ATLAS_BLEED
+    v1 = (uv_row + 1) * h - ATLAS_BLEED
+    return u0, v0, u1, v1
+
+
+def _face_uvs(face_idx, block_type, quad_verts):
+    tile = _block_tile_for_face(block_type, int(face_idx))
+    u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
+
+    xs = [float(v.x) for v in quad_verts]
+    ys = [float(v.y) for v in quad_verts]
+    zs = [float(v.z) for v in quad_verts]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    z0, z1 = min(zs), max(zs)
+
+    du = max(u1 - u0, 1e-8)
+    dv = max(v1 - v0, 1e-8)
+    out = []
+
+    for p in quad_verts:
+        vx = float(p.x)
+        vy = float(p.y)
+        vz = float(p.z)
+
+        # World-aligned mapping per face to avoid mirrored/rotated tiles.
+        if face_idx == 1:      # top (+y)
+            lu = vx - x0
+            lv = z1 - vz
+        elif face_idx == 0:    # bottom (-y)
+            lu = vx - x0
+            lv = vz - z0
+        elif face_idx == 2:    # +z
+            lu = vx - x0
+            lv = vy - y0
+        elif face_idx == 3:    # -z
+            lu = x1 - vx
+            lv = vy - y0
+        elif face_idx == 4:    # +x
+            lu = z1 - vz
+            lv = vy - y0
+        else:                  # -x
+            lu = vz - z0
+            lv = vy - y0
+
+        lu = clamp(lu, 0.0, 1.0)
+        lv = clamp(lv, 0.0, 1.0)
+        out.append(Vec2(u0 + lu * du, v0 + lv * dv))
+
+    return out
+
+
+def _face_vertices(pos_key, face_idx):
+    base = _cube_base_from_face(pos_key, face_idx)
+    x = float(base[0])
+    y = float(base[1])
+    z = float(base[2])
+
+    x0 = x - BLOCK_HALF_EXTENT
+    x1 = x + BLOCK_HALF_EXTENT
+    y0 = y + float(_FACE_OFFSETS[0].y)
+    y1 = y + float(_FACE_OFFSETS[1].y)
+    z0 = z - BLOCK_HALF_EXTENT
+    z1 = z + BLOCK_HALF_EXTENT
+
+    if face_idx == 0:  # bottom (-y)
+        return [
+            Vec3(x0, y0, z0),
+            Vec3(x1, y0, z0),
+            Vec3(x1, y0, z1),
+            Vec3(x0, y0, z1),
+        ]
+    if face_idx == 1:  # top (+y)
+        return [
+            Vec3(x0, y1, z0),
+            Vec3(x0, y1, z1),
+            Vec3(x1, y1, z1),
+            Vec3(x1, y1, z0),
+        ]
+    if face_idx == 2:  # +z
+        return [
+            Vec3(x0, y0, z1),
+            Vec3(x1, y0, z1),
+            Vec3(x1, y1, z1),
+            Vec3(x0, y1, z1),
+        ]
+    if face_idx == 3:  # -z
+        return [
+            Vec3(x0, y0, z0),
+            Vec3(x0, y1, z0),
+            Vec3(x1, y1, z0),
+            Vec3(x1, y0, z0),
+        ]
+    if face_idx == 4:  # +x
+        return [
+            Vec3(x1, y0, z0),
+            Vec3(x1, y1, z0),
+            Vec3(x1, y1, z1),
+            Vec3(x1, y0, z1),
+        ]
+    # face_idx == 5 (-x)
+    return [
+        Vec3(x0, y0, z0),
+        Vec3(x0, y0, z1),
+        Vec3(x0, y1, z1),
+        Vec3(x0, y1, z0),
+    ]
+
+
 def _chunk_coord_from_pos(pos):
     cx = math.floor(float(pos[0]) / chunk_size)
     cz = math.floor(float(pos[2]) / chunk_size)
@@ -160,6 +376,14 @@ def _sync_chunk_lists(chunk_idx):
     all_chunks[chunk_idx] = [faces, faces2, faces3]
 
 
+def _block_type_from_face_key(face_key):
+    btype = face_block_types.get(face_key)
+    if btype is not None:
+        return btype
+    base = _cube_base_from_face(face_key[0], face_key[1])
+    return block_types.get(base, DEFAULT_BLOCK_TYPE)
+
+
 def _rebuild_chunk_mesh(chunk_idx):
     old = combined_terrains[chunk_idx]
     _safe_clear_destroy(old)
@@ -168,26 +392,27 @@ def _rebuild_chunk_mesh(chunk_idx):
         combined_terrains[chunk_idx] = None
         return
 
-    terrain = Entity(texture=texture)
-
+    vertices = []
+    triangles = []
+    uvs = []
+    normals = []
     for pos_key, fidx in chunk_face_sets[chunk_idx]:
-        fp = Vec3(pos_key[0], pos_key[1], pos_key[2])
-        Entity(
-            model="plane",
-            position=fp,
-            rotation=_face_rotation(fidx),
-            parent=terrain,
-        )
+        face_key = (pos_key, int(fidx))
+        btype = _block_type_from_face_key(face_key)
+        quad_verts = _face_vertices(pos_key, int(fidx))
+        quad_uvs = _face_uvs(int(fidx), btype, quad_verts)
+        n = _FACE_NORMALS.get(int(fidx), Vec3(0, 1, 0))
+        idx0 = len(vertices)
 
-    combined = terrain.combine()
+        vertices.extend(quad_verts)
+        uvs.extend(quad_uvs)
+        normals.extend([n, n, n, n])
+        # Panda/Ursina culls by triangle winding; this order keeps outside faces visible.
+        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+
+    mesh = Mesh(vertices=vertices, triangles=triangles, uvs=uvs, normals=normals, mode="triangle", static=True)
+    combined = Entity(model=mesh, texture=atlas_texture if atlas_texture is not None else texture)
     combined_terrains[chunk_idx] = combined
-    try:
-        combined.texture = texture
-    except:
-        pass
-
-    terrain.clear()
-    destroy(terrain)
 
 
 def _refresh_chunks(affected_chunks):
@@ -564,23 +789,34 @@ def _remove_face(face_key, affected):
     chunk_idx = face_to_chunk.get(face_key)
     if chunk_idx is None:
         return False
+    base = _cube_base_from_face(face_key[0], face_key[1])
 
     world_faces.discard(face_key)
     face_to_chunk.pop(face_key, None)
+    face_block_types.pop(face_key, None)
     chunk_face_sets[chunk_idx].discard(face_key)
     _unregister_top_face(face_key[0], face_key[1])
+    if base not in block_face_counts:
+        block_types.pop(base, None)
     affected.add(chunk_idx)
     return True
 
 
-def _add_face(face_key, chunk_idx, affected):
+def _add_face(face_key, chunk_idx, affected, block_type=None):
     if chunk_idx is None:
         return False
     if face_key in world_faces:
         return False
+    base = _cube_base_from_face(face_key[0], face_key[1])
+    if block_type is None:
+        block_type = block_types.get(base, DEFAULT_BLOCK_TYPE)
+    block_type = _normalize_block_type(block_type)
 
     world_faces.add(face_key)
     face_to_chunk[face_key] = chunk_idx
+    face_block_types[face_key] = block_type
+    if base not in block_types:
+        block_types[base] = block_type
     chunk_face_sets[chunk_idx].add(face_key)
     _register_top_face(face_key[0], face_key[1])
     affected.add(chunk_idx)
@@ -590,6 +826,8 @@ def _add_face(face_key, chunk_idx, affected):
 def load_chunks():
     world_faces.clear()
     face_to_chunk.clear()
+    face_block_types.clear()
+    block_types.clear()
     top_columns.clear()
     top_cells.clear()
     block_face_counts.clear()
@@ -604,11 +842,15 @@ def load_chunks():
 
         positions = chunk_data[0]
         indices = chunk_data[1]
+        block_type_data = chunk_data[2] if len(chunk_data) > 2 else None
 
         for i, face_pos in enumerate(positions):
             if i >= len(indices):
                 break
             fidx = int(indices[i])
+            btype = DEFAULT_BLOCK_TYPE
+            if block_type_data is not None and i < len(block_type_data):
+                btype = _normalize_block_type(block_type_data[i])
 
             key = _face_key(face_pos, fidx)
             if key in world_faces:
@@ -616,6 +858,10 @@ def load_chunks():
 
             world_faces.add(key)
             face_to_chunk[key] = chunk_idx
+            face_block_types[key] = btype
+            base = _cube_base_from_face(key[0], key[1])
+            if base not in block_types:
+                block_types[base] = btype
             chunk_face_sets[chunk_idx].add(key)
             _register_top_face(key[0], key[1])
 
@@ -702,7 +948,7 @@ def build():
             _remove_face(opp, affected)  # opposite becomes internal
         elif same not in world_faces:
             tgt = _chunk_index_from_pos(fp)
-            _add_face(same, tgt, affected)  # new outside face
+            _add_face(same, tgt, affected, selected_block_type)  # new outside face
 
     _refresh_chunks(affected)
     c.y = -9999
@@ -746,7 +992,7 @@ def update():
 
 
 def input(key):
-    global mode, vertical_velocity, is_grounded
+    global mode, vertical_velocity, is_grounded, selected_block_type
 
     if key == "o":
         mode = 1 - mode
@@ -762,6 +1008,9 @@ def input(key):
     if key == "e":
         player.enabled = not player.enabled
         print(len(scene.entities))
+    if key in BLOCK_SELECT_KEYS:
+        selected_block_type = BLOCK_SELECT_KEYS[key]
+        print(f"[build] selected block: {selected_block_type}")
 
     if key in ("right mouse down", "5"):
         face_pos, normal, face_idx = get_target_face()
