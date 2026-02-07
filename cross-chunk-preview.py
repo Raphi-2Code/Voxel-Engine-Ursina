@@ -8,98 +8,37 @@ import numpy as np
 
 app = Ursina()
 player = FirstPersonController(gravity=0)
+player.speed = 20
 
 cube_faces = [
-    (0, 1, 0, 180, 0, 0),
-    (0, 2, 0, 0, 0, 0),
-    (0, 1.5, 0.5, 90, 0, 0),
-    (0, 1.5, -0.5, -90, 0, 0),
-    (0.5, 1.5, 0, 0, 0, 90),
-    (-0.5, 1.5, 0, 0, 0, -90),
-]
-cube_faces2 = [
-    (0, 2, 0, 180, 0, 0),
-    (0, 1, 0, 0, 0, 0),
-    (0, 1.5, -0.5, 90, 0, 0),
-    (0, 1.5, 0.5, -90, 0, 0),
-    (-0.5, 1.5, 0, 0, 0, 90),
-    (0.5, 1.5, 0, 0, 0, -90),
+    (0, 1, 0, 180, 0, 0),      # 0 bottom
+    (0, 2, 0, 0, 0, 0),        # 1 top
+    (0, 1.5, 0.5, 90, 0, 0),   # 2 +z
+    (0, 1.5, -0.5, -90, 0, 0), # 3 -z
+    (0.5, 1.5, 0, 0, 0, 90),   # 4 +x
+    (-0.5, 1.5, 0, 0, 0, -90), # 5 -x
 ]
 
-seed = ord("y") + ord("o")
+seed = ord('y') + ord('o')
 octaves = 0.5
 frequency = 8
 amplitude = 1
 
-
-class Perlin:
-    def __init__(self):
-        self.seed = seed
-        self.octaves = octaves
-        self.freq = frequency
-        self.amplitude = amplitude
-        self.pNoise = PerlinNoise(seed=self.seed, octaves=self.octaves)
-
-    def get_height(self, x, z):
-        return self.pNoise([x / self.freq, z / self.freq]) * self.amplitude
-
-
-chunk_rendering = 10
-all_chunks = []
-noise = Perlin()
-texture = "sand"
-xpos = 0
-zpos = 0
 chunk_size = 16
-combined_terrains = []
+texture = "sand"
+chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]  # 4x4
 
+# all_chunks[chunk_idx] = [chunk_faces(xz list), chunk_faces2(xyz list), chunk_faces3(face_idx list)]
+all_chunks = [[[], [], []] for _ in chunk_net]
 
-def get_from_server_and_render():
-    chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
-    for chunks_opened in chunks_opened_:
-        terrain = Entity(texture="sand")
-        print("yo")
-        chunk_faces2 = []
-        chunk_faces = []
-        chunk_faces3 = []
+# Fast structures
+chunk_face_sets = [set() for _ in chunk_net]   # set[((x,y,z), face_idx)] per chunk
+world_faces = set()                            # union of all chunk_face_sets
+face_to_chunk = {}                             # ((x,y,z), face_idx) -> chunk_idx
 
-        for face_position in chunks_opened[0]:
-            chunk_faces2.append(face_position)
-            chunk_faces.append([face_position[0], face_position[2]])
-            chunk_faces3.append(chunks_opened[1][chunks_opened[0].index(face_position)])
-            Entity(
-                model="plane",
-                position=face_position,
-                rotation=Vec3(
-                    cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][3],
-                    cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][4],
-                    cube_faces[chunks_opened[1][chunks_opened[0].index(face_position)]][5],
-                ),
-                parent=terrain,
-            )
-
-        all_chunks.append([chunk_faces, chunk_faces2, chunk_faces3])
-        chunk_faces2 = []
-        chunk_faces = []
-        chunk_faces3 = []
-        p = terrain.combine()
-        terrain.clear()
-        destroy(terrain)
-        combined_terrains.append(p)
-
-    return all_chunks
-
-
-all_chunks = get_from_server_and_render()
-
-try:
-    player.y = all_chunks[1][all_chunks[0].index([round(player.x * 2) / 2, round(player.z * 2) / 2])][1]
-except:
-    pass
+combined_terrains = [None for _ in chunk_net]
 
 mode = 1
-save = 0
-q = (0, -9999, 0)
 c = Entity(model="cube", color=color.clear, collider="box")
 c2 = Entity(model="cube", texture="frame")
 
@@ -121,13 +60,169 @@ _OPPOSITE_FACE = {
 }
 
 
+class Perlin:
+    def __init__(self):
+        self.seed = seed
+        self.octaves = octaves
+        self.freq = frequency
+        self.amplitude = amplitude
+        self.pNoise = PerlinNoise(seed=self.seed, octaves=self.octaves)
+
+    def get_height(self, x, z):
+        return self.pNoise([x / self.freq, z / self.freq]) * self.amplitude
+
+
+noise = Perlin()
+
+
 def _vkey(v):
     return (round(float(v[0]), 4), round(float(v[1]), 4), round(float(v[2]), 4))
 
 
+def _face_key(pos, face_idx):
+    return (_vkey(pos), int(face_idx))
+
+
+def _face_rotation(face_idx):
+    return (
+        cube_faces[face_idx][3],
+        cube_faces[face_idx][4],
+        cube_faces[face_idx][5],
+    )
+
+
 def _chunk_index_from_pos(pos):
     key = f"{int(pos[0] // chunk_size)}{int(pos[2] // chunk_size)}"
-    return chunk_net.index(key) if key in chunk_net else None
+    if key not in chunk_net:
+        return None
+    return chunk_net.index(key)
+
+
+def _safe_clear_destroy(obj):
+    if obj is None:
+        return
+    try:
+        obj.clear()
+    except:
+        pass
+    try:
+        destroy(obj)
+    except:
+        pass
+
+
+def _sync_chunk_lists(chunk_idx):
+    faces2 = []
+    faces3 = []
+    for pos_key, fidx in chunk_face_sets[chunk_idx]:
+        faces2.append((pos_key[0], pos_key[1], pos_key[2]))
+        faces3.append(int(fidx))
+    faces = [[fp[0], fp[2]] for fp in faces2]
+    all_chunks[chunk_idx] = [faces, faces2, faces3]
+
+
+def _rebuild_chunk_mesh(chunk_idx):
+    old = combined_terrains[chunk_idx]
+    _safe_clear_destroy(old)
+
+    if len(chunk_face_sets[chunk_idx]) == 0:
+        combined_terrains[chunk_idx] = None
+        return
+
+    terrain = Entity(texture=texture)
+
+    for pos_key, fidx in chunk_face_sets[chunk_idx]:
+        fp = Vec3(pos_key[0], pos_key[1], pos_key[2])
+        Entity(
+            model="plane",
+            position=fp,
+            rotation=_face_rotation(fidx),
+            parent=terrain,
+            # rote Farbe color=color.brown,
+        )
+
+    combined = terrain.combine()
+    combined_terrains[chunk_idx] = combined
+    try:
+        combined.texture = texture
+    except:
+        pass
+
+    terrain.clear()
+    destroy(terrain)
+
+
+def _refresh_chunks(affected_chunks):
+    for chunk_idx in affected_chunks:
+        if chunk_idx is None:
+            continue
+        _sync_chunk_lists(chunk_idx)
+        _rebuild_chunk_mesh(chunk_idx)
+
+
+def _remove_face(face_key, affected):
+    if face_key not in world_faces:
+        return False
+    chunk_idx = face_to_chunk.get(face_key)
+    if chunk_idx is None:
+        return False
+
+    world_faces.discard(face_key)
+    face_to_chunk.pop(face_key, None)
+    chunk_face_sets[chunk_idx].discard(face_key)
+    affected.add(chunk_idx)
+    return True
+
+
+def _add_face(face_key, chunk_idx, affected):
+    if chunk_idx is None:
+        return False
+    if face_key in world_faces:
+        return False
+
+    world_faces.add(face_key)
+    face_to_chunk[face_key] = chunk_idx
+    chunk_face_sets[chunk_idx].add(face_key)
+    affected.add(chunk_idx)
+    return True
+
+
+def load_chunks():
+    chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
+
+    for chunk_idx, chunk_data in enumerate(chunks_opened_):
+        if chunk_idx >= len(chunk_net):
+            break
+
+        positions = chunk_data[0]
+        indices = chunk_data[1]
+
+        for i, face_pos in enumerate(positions):
+            if i >= len(indices):
+                break
+            fidx = int(indices[i])
+
+            key = _face_key(face_pos, fidx)
+            if key in world_faces:
+                continue
+
+            world_faces.add(key)
+            face_to_chunk[key] = chunk_idx
+            chunk_face_sets[chunk_idx].add(key)
+
+    for i in range(len(chunk_net)):
+        _sync_chunk_lists(i)
+        _rebuild_chunk_mesh(i)
+
+
+load_chunks()
+
+try:
+    # simple spawn near first face
+    first_face = next(iter(world_faces))
+    player.position = Vec3(first_face[0][0], first_face[0][1] + 2, first_face[0][2])
+except:
+    player.position = Vec3(0, 6, 0)
 
 
 def get_target_face(max_distance: int = 12):
@@ -148,6 +243,7 @@ def get_target_face(max_distance: int = 12):
         closest_face = None
         closest_idx = None
         min_dist = 0.6
+
         for idx, fp in enumerate(faces):
             d = distance(fp, point)
             if d < min_dist:
@@ -162,19 +258,52 @@ def get_target_face(max_distance: int = 12):
     return None, None, None
 
 
-def update():
-    global mode
-    if mode == 0:
-        x = player.x // chunk_size
-        z = player.z // chunk_size
-        try:
-            chunk_faces2_ = x * z + 1
-            chunk_faces_ = x * z
-            chunk_faces3_ = x * z + 2
-            player.y = chunk_faces2_[chunk_faces_.index([round(player.x * 2) / 2, round(player.z * 2) / 2])][1]
-        except:
-            pass
+def build():
+    cube_base = Vec3(c.position) + Vec3(0, -1.5, 0)
+    affected = set()
 
+    for i, off in enumerate(_FACE_OFFSETS):
+        fp = cube_base + off
+        same = _face_key(fp, i)
+        opp = _face_key(fp, _OPPOSITE_FACE[i])
+
+        if opp in world_faces:
+            _remove_face(opp, affected)  # opposite becomes internal
+        elif same not in world_faces:
+            tgt = _chunk_index_from_pos(fp)
+            _add_face(same, tgt, affected)  # new outside face
+
+    _refresh_chunks(affected)
+    c.y = -9999
+
+
+def mine(face_pos=None, face_idx=None):
+    if face_pos is None or face_idx is None:
+        face_pos, _, face_idx = get_target_face()
+        if face_pos is None:
+            c.y = -9999
+            return
+
+    # IMPORTANT: mine touched block itself (without +normal)
+    cube_base = Vec3(face_pos) - _FACE_OFFSETS[face_idx]
+    affected = set()
+
+    for i, off in enumerate(_FACE_OFFSETS):
+        fp = cube_base + off
+        same = _face_key(fp, i)
+        opp = _face_key(fp, _OPPOSITE_FACE[i])
+
+        if same in world_faces:
+            _remove_face(same, affected)      # remove mined cube face
+        else:
+            tgt = _chunk_index_from_pos(fp)
+            _add_face(opp, tgt, affected)     # expose neighbor face
+
+    _refresh_chunks(affected)
+    c.y = -9999
+
+
+def update():
     face_pos, _, _ = get_target_face()
     if face_pos:
         c2.position = Vec3(round(face_pos[0]), round(face_pos[1]), round(face_pos[2])) + (0, -0.5, 0)
@@ -182,262 +311,31 @@ def update():
         c2.position = floor(player.position + player.forward * 4)
 
 
-chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]
-count = 0
-
-
-def build():
-    global all_chunks, c, chunk_net, chunk_size, combined_terrains, texture
-
-    base_chunk_key = f"{int(c.x // chunk_size)}{int(c.z // chunk_size)}"
-    if base_chunk_key not in chunk_net:
-        c.y = -9999
-        return
-
-    pos = Vec3(c.position) + Vec3(0, -1.5, 0)
-
-    # 6 potenzielle Flächen des neuen Blocks
-    new_faces = []
-    for face_idx, elem in enumerate(cube_faces):
-        face_pos = Vec3(elem[0] + pos[0], elem[1] + pos[1], elem[2] + pos[2])
-        new_faces.append((face_idx, face_pos))
-
-    # Lookup: world-face-position -> [(chunk_idx, local_face_idx, face_idx), ...]
-    face_lookup = {}
-    for chunk_idx, (_, chunk_faces2, chunk_faces3) in enumerate(all_chunks):
-        for local_idx, fp in enumerate(chunk_faces2):
-            key = _vkey(fp)
-            face_lookup.setdefault(key, []).append((chunk_idx, local_idx, chunk_faces3[local_idx]))
-
-    remove_indices = {}  # chunk_idx -> set(local_face_idx)
-    add_faces = {}       # chunk_idx -> [(face_pos, face_idx), ...]
-
-    for face_idx, face_pos in new_faces:
-        key = _vkey(face_pos)
-        opposite_idx = _OPPOSITE_FACE[face_idx]
-        entries = face_lookup.get(key, [])
-
-        opposite_entry = next((e for e in entries if e[2] == opposite_idx), None)
-        same_entry = next((e for e in entries if e[2] == face_idx), None)
-
-        if opposite_entry is not None:
-            # Innenfläche: vorhandene Gegenfläche entfernen, neue nicht hinzufügen
-            chunk_i, local_i, _ = opposite_entry
-            remove_indices.setdefault(chunk_i, set()).add(local_i)
-            continue
-
-        if same_entry is not None:
-            # Fläche existiert bereits
-            continue
-
-        target_chunk_idx = _chunk_index_from_pos(face_pos)
-        if target_chunk_idx is None:
-            continue
-
-        add_faces.setdefault(target_chunk_idx, []).append((face_pos, face_idx))
-
-    affected_chunks = set(remove_indices.keys()) | set(add_faces.keys())
-
-    for chunk_idx in affected_chunks:
-        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_idx]
-        remove_set = remove_indices.get(chunk_idx, set())
-
-        new_chunk_faces = []
-        new_chunk_faces2 = []
-        new_chunk_faces3 = []
-
-        for local_idx, element in enumerate(chunk_faces2):
-            if local_idx in remove_set:
-                continue
-            new_chunk_faces2.append(element)
-            new_chunk_faces.append([element[0], element[2]])
-            new_chunk_faces3.append(chunk_faces3[local_idx])
-
-        existing_keys = {_vkey(fp) for fp in new_chunk_faces2}
-        for face_pos, face_idx in add_faces.get(chunk_idx, []):
-            k = _vkey(face_pos)
-            if k in existing_keys:
-                continue
-            new_chunk_faces2.append((face_pos[0], face_pos[1], face_pos[2]))
-            new_chunk_faces.append([face_pos[0], face_pos[2]])
-            new_chunk_faces3.append(face_idx)
-            existing_keys.add(k)
-
-        all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
-
-        combined_terrains[chunk_idx].clear()
-
-        terrain2 = Entity(texture="sand")
-        for i, face_pos in enumerate(new_chunk_faces2):
-            Entity(
-                model="plane",
-                position=face_pos,
-                rotation=(
-                    cube_faces[new_chunk_faces3[i]][3],
-                    cube_faces[new_chunk_faces3[i]][4],
-                    cube_faces[new_chunk_faces3[i]][5],
-                ),
-                parent=terrain2,
-                color=color.brown,
-            )
-
-        combined_entity = terrain2.combine()
-        combined_terrains[chunk_idx] = combined_entity
-        combined_entity.texture = texture
-        terrain2.clear()
-        destroy(terrain2)
-
-    c.y = -9999
-
-
-def mine():
-    global all_chunks, p, chunk_net, chunk_size, combined_terrains, texture
-
-    cint = chunk_net.index(str(int(c.x // chunk_size)) + str(int(c.z // chunk_size)))
-
-    affected_chunks = {}
-    affected_chunks[cint] = {"faces": [], "to_remove": [], "to_add": []}  # Current chunk
-
-    for cube_face in cube_faces2:
-        pos___ = Vec3(cube_face[0], cube_face[1], cube_face[2]) + Vec3(c.position) + Vec3(0, -2.5, 0)
-
-        face_chunk_x = int(pos___[0] // chunk_size)
-        face_chunk_z = int(pos___[2] // chunk_size)
-        face_chunk_key = f"{face_chunk_x}{face_chunk_z}"
-
-        if face_chunk_key in chunk_net:
-            face_chunk_idx = chunk_net.index(face_chunk_key)
-
-            if face_chunk_idx not in affected_chunks:
-                affected_chunks[face_chunk_idx] = {"faces": [], "to_remove": [], "to_add": []}
-
-            affected_chunks[face_chunk_idx]["faces"].append((pos___, cube_face))
-
-    for chunk_idx, data in affected_chunks.items():
-        chunk_faces, chunk_faces2, chunk_faces3 = all_chunks[chunk_idx]
-
-        combined_terrains[chunk_idx].clear()
-
-        new_chunk_faces = []
-        new_chunk_faces2 = []
-        new_chunk_faces3 = []
-
-        for pos___, cube_face in data["faces"]:
-            if pos___ in chunk_faces2:
-                cpos = chunk_faces2.index(pos___)
-                data["to_remove"].append(pos___)
-            else:
-                data["to_add"].append((pos___, cube_faces2.index(cube_face)))
-
-        pll = 0
-        for element in chunk_faces2:
-            if element not in data["to_remove"]:
-                new_chunk_faces2.append(element)
-                new_chunk_faces.append([element[0], element[2]])
-                new_chunk_faces3.append(chunk_faces3[pll])
-            pll += 1
-
-        for face_pos, face_idx in data["to_add"]:
-            new_chunk_faces2.append(face_pos)
-            new_chunk_faces.append([face_pos[0], face_pos[2]])
-            new_chunk_faces3.append(face_idx)
-
-        all_chunks[chunk_idx] = [new_chunk_faces, new_chunk_faces2, new_chunk_faces3]
-
-        terrain2 = Entity()
-        for i, face_pos in enumerate(new_chunk_faces2):
-            Entity(
-                model="plane",
-                position=face_pos,
-                rotation=(cube_faces[new_chunk_faces3[i]][3], cube_faces[new_chunk_faces3[i]][4], cube_faces[new_chunk_faces3[i]][5]),
-                parent=terrain2,
-            )
-
-        p = terrain2.combine()
-        combined_terrains[chunk_idx] = p
-        p.texture = texture
-        terrain2.clear()
-        destroy(terrain2)
-
-    c.y = -9999
-
-
-player.speed = 20
-print(len(all_chunks))
-
-
 def input(key):
-    global p, mode, save, q, count
-
-    if key == "g":
-        if len(p.vertices) != 0:
-            p_verts = p.vertices
-            p_norms = p.normals
-            p_uvs = p.uvs
-            p.clear()
-            [p_verts.pop(3 + i) for i in range(6)]
-            [p_uvs.pop(3 + i_) for i_ in range(6)]
-            p.vertices = p_verts
-            p.normals = p_norms
-            p.uvs = p_uvs
-            p.generate()
+    global mode
 
     if key == "o":
         mode = 1 - mode
-
     if key == "m":
         player.y += 1
-
     if key == "l":
         player.y -= 1
-
-    if save == 1:
-        if mouse.hovered_entity == c:
-            build()
-        else:
-            c.y = -9999
-        save = 0
-
-    if save == 2:
-        if mouse.hovered_entity == c:
-            mine()
-        c.y = -9999
-        save = 0
-
-    if key == "right mouse down" or key == "5":
-        face_pos, normal, face_idx = get_target_face()
-        if face_pos:
-            base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
-            c.position = base_pos + Vec3(0, 1.5, 0)
-            save = 1
-
-    if key in ("left mouse down", "4"):
-        face_pos, normal, face_idx = get_target_face()
-        if face_pos:
-            base_pos = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
-            c.position = base_pos + Vec3(0, 1.5, 0)
-            mine()
-            c.y = -9999
-
-    if key == "up arrow":
-        p_verts = p.vertices
-        p_norms = p.normals
-        p_uvs = p.uvs
-        p.clear()
-        try:
-            [p_verts.pop(count * 6 + _i_) for _i_ in range(6)]
-            [p_uvs.pop(count * 6 + _i_) for _i_ in range(6)]
-        except:
-            pass
-        p.vertices = p_verts
-        p.normals = p_norms
-        p.uvs = p_uvs
-        p.generate()
-        count += 1
-
     if key == "e":
         player.enabled = not player.enabled
         print(len(scene.entities))
+
+    if key in ("right mouse down", "5"):
+        face_pos, normal, face_idx = get_target_face()
+        if face_pos:
+            # block next to clicked face
+            cube_base = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
+            c.position = cube_base + Vec3(0, 1.5, 0)
+            build()
+
+    if key in ("left mouse down", "4"):
+        face_pos, _, face_idx = get_target_face()
+        if face_pos:
+            mine(face_pos, face_idx)
 
 
 app.run()
