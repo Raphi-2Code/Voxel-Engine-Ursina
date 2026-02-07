@@ -26,6 +26,7 @@ frequency = 8
 amplitude = 1
 
 chunk_size = 16
+chunk_height = 16
 texture = "atlas"
 
 # Atlas setup (tile coordinates are from top-left).
@@ -106,17 +107,20 @@ if atlas_texture is not None:
 
 GRID_X = 4
 GRID_Z = 4
-chunk_keys = [(cx, cz) for cx in range(GRID_X) for cz in range(GRID_Z)]
-chunk_index = {k: i for i, k in enumerate(chunk_keys)}
+base_chunk_coords = [(cx, 0, cz) for cx in range(GRID_X) for cz in range(GRID_Z)]
 
 
-all_chunks = [[[], [], []] for _ in chunk_keys]
-chunk_face_sets = [set() for _ in chunk_keys]
-combined_terrains = [None for _ in chunk_keys]
+all_chunks = {}
+chunk_face_sets = {}
+combined_terrains = {}
+for coord in base_chunk_coords:
+    all_chunks[coord] = [[], [], []]
+    chunk_face_sets[coord] = set()
+    combined_terrains[coord] = None
 
 
 world_faces = set()                            # union of all chunk_face_sets
-face_to_chunk = {}                             # ((x,y,z), face_idx) -> chunk_idx
+face_to_chunk = {}                             # ((x,y,z), face_idx) -> (cx,cy,cz)
 face_block_types = {}                          # ((x,y,z), face_idx) -> block type
 block_types = {}                               # (base_x, base_y, base_z) -> block type
 
@@ -345,12 +349,36 @@ def _face_vertices(pos_key, face_idx):
 
 def _chunk_coord_from_pos(pos):
     cx = math.floor(float(pos[0]) / chunk_size)
+    cy = math.floor(float(pos[1]) / chunk_height)
     cz = math.floor(float(pos[2]) / chunk_size)
-    return (cx, cz)
+    return (cx, cy, cz)
 
 
-def _chunk_index_from_pos(pos):
-    return chunk_index.get(_chunk_coord_from_pos(pos))
+def _legacy_chunk_coord_from_index(idx):
+    cx = int(idx) // GRID_Z
+    cz = int(idx) % GRID_Z
+    return (cx, 0, cz)
+
+
+def _ensure_chunk(chunk_coord):
+    key = (int(chunk_coord[0]), int(chunk_coord[1]), int(chunk_coord[2]))
+    if key not in chunk_face_sets:
+        chunk_face_sets[key] = set()
+        all_chunks[key] = [[], [], []]
+        combined_terrains[key] = None
+    return key
+
+
+def _reset_chunk_storage():
+    for obj in combined_terrains.values():
+        _safe_clear_destroy(obj)
+    all_chunks.clear()
+    chunk_face_sets.clear()
+    combined_terrains.clear()
+    for coord in base_chunk_coords:
+        all_chunks[coord] = [[], [], []]
+        chunk_face_sets[coord] = set()
+        combined_terrains[coord] = None
 
 
 def _safe_clear_destroy(obj):
@@ -378,14 +406,15 @@ def _safe_clear_destroy(obj):
         pass
 
 
-def _sync_chunk_lists(chunk_idx):
+def _sync_chunk_lists(chunk_coord):
+    chunk_coord = _ensure_chunk(chunk_coord)
     faces2 = []
     faces3 = []
-    for pos_key, fidx in chunk_face_sets[chunk_idx]:
+    for pos_key, fidx in chunk_face_sets[chunk_coord]:
         faces2.append((pos_key[0], pos_key[1], pos_key[2]))
         faces3.append(int(fidx))
     faces = [[fp[0], fp[2]] for fp in faces2]
-    all_chunks[chunk_idx] = [faces, faces2, faces3]
+    all_chunks[chunk_coord] = [faces, faces2, faces3]
 
 
 def _block_type_from_face_key(face_key):
@@ -396,19 +425,20 @@ def _block_type_from_face_key(face_key):
     return block_types.get(base, DEFAULT_BLOCK_TYPE)
 
 
-def _rebuild_chunk_mesh(chunk_idx):
-    old = combined_terrains[chunk_idx]
+def _rebuild_chunk_mesh(chunk_coord):
+    chunk_coord = _ensure_chunk(chunk_coord)
+    old = combined_terrains.get(chunk_coord)
 
-    if len(chunk_face_sets[chunk_idx]) == 0:
+    if len(chunk_face_sets[chunk_coord]) == 0:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_idx] = None
+        combined_terrains[chunk_coord] = None
         return
 
     vertices = []
     triangles = []
     uvs = []
     normals = []
-    for pos_key, fidx in chunk_face_sets[chunk_idx]:
+    for pos_key, fidx in chunk_face_sets[chunk_coord]:
         face_key = (pos_key, int(fidx))
         btype = _block_type_from_face_key(face_key)
         quad_verts = _face_vertices(pos_key, int(fidx))
@@ -426,25 +456,25 @@ def _rebuild_chunk_mesh(chunk_idx):
     tex = atlas_texture if atlas_texture is not None else texture
 
     if old is None:
-        combined_terrains[chunk_idx] = Entity(model=mesh, texture=tex)
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)
         return
 
     try:
         old.model = mesh
         old.texture = tex
         old.enabled = True
-        combined_terrains[chunk_idx] = old
+        combined_terrains[chunk_coord] = old
     except:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_idx] = Entity(model=mesh, texture=tex)
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)
 
 
 def _refresh_chunks(affected_chunks):
-    for chunk_idx in affected_chunks:
-        if chunk_idx is None:
+    for chunk_coord in affected_chunks:
+        if chunk_coord is None:
             continue
-        _sync_chunk_lists(chunk_idx)
-        _rebuild_chunk_mesh(chunk_idx)
+        _sync_chunk_lists(chunk_coord)
+        _rebuild_chunk_mesh(chunk_coord)
 
 
 def _cube_base_from_face(pos_key, face_idx):
@@ -455,6 +485,11 @@ def _cube_base_from_face(pos_key, face_idx):
 def _face_pos_from_base(base, face_idx):
     off = _FACE_OFFSETS[int(face_idx)]
     return _vkey((base[0] + off.x, base[1] + off.y, base[2] + off.z))
+
+
+def _chunk_coord_from_face(pos_key, face_idx):
+    base = _cube_base_from_face(pos_key, face_idx)
+    return _chunk_coord_from_pos(base)
 
 
 def _register_top_face(pos_key, face_idx):
@@ -815,19 +850,19 @@ def _apply_vector_gravity():
 def _remove_face(face_key, affected):
     if face_key not in world_faces:
         return False
-    chunk_idx = face_to_chunk.get(face_key)
+    chunk_coord = face_to_chunk.get(face_key)
     base = _cube_base_from_face(face_key[0], face_key[1])
     removed_from_chunk_set = False
 
-    if chunk_idx is not None and face_key in chunk_face_sets[chunk_idx]:
-        chunk_face_sets[chunk_idx].discard(face_key)
-        affected.add(chunk_idx)
+    if chunk_coord is not None and chunk_coord in chunk_face_sets and face_key in chunk_face_sets[chunk_coord]:
+        chunk_face_sets[chunk_coord].discard(face_key)
+        affected.add(chunk_coord)
         removed_from_chunk_set = True
     else:
-        for idx, fset in enumerate(chunk_face_sets):
+        for coord, fset in chunk_face_sets.items():
             if face_key in fset:
                 fset.discard(face_key)
-                affected.add(idx)
+                affected.add(coord)
                 removed_from_chunk_set = True
                 break
 
@@ -840,15 +875,13 @@ def _remove_face(face_key, affected):
 
     # Safety net for desynced state: ensure visual mesh catches up.
     if not removed_from_chunk_set:
-        for idx in range(len(chunk_face_sets)):
-            affected.add(idx)
+        affected.update(chunk_face_sets.keys())
 
     return True
 
 
-def _add_face(face_key, chunk_idx, affected, block_type=None):
-    if chunk_idx is None:
-        return False
+def _add_face(face_key, chunk_coord, affected, block_type=None):
+    chunk_coord = _ensure_chunk(chunk_coord)
     if face_key in world_faces:
         return False
     base = _cube_base_from_face(face_key[0], face_key[1])
@@ -857,13 +890,13 @@ def _add_face(face_key, chunk_idx, affected, block_type=None):
     block_type = _normalize_block_type(block_type)
 
     world_faces.add(face_key)
-    face_to_chunk[face_key] = chunk_idx
+    face_to_chunk[face_key] = chunk_coord
     face_block_types[face_key] = block_type
     if base not in block_types:
         block_types[base] = block_type
-    chunk_face_sets[chunk_idx].add(face_key)
+    chunk_face_sets[chunk_coord].add(face_key)
     _register_top_face(face_key[0], face_key[1])
-    affected.add(chunk_idx)
+    affected.add(chunk_coord)
     return True
 
 
@@ -875,15 +908,12 @@ def load_chunks():
     top_columns.clear()
     top_cells.clear()
     block_face_counts.clear()
-    for i in range(len(chunk_face_sets)):
-        chunk_face_sets[i].clear()
+    _reset_chunk_storage()
 
     chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
 
-    for chunk_idx, chunk_data in enumerate(chunks_opened_):
-        if chunk_idx >= len(chunk_keys):
-            break
-
+    for legacy_idx, chunk_data in enumerate(chunks_opened_):
+        _ensure_chunk(_legacy_chunk_coord_from_index(legacy_idx))
         positions = chunk_data[0]
         indices = chunk_data[1]
         block_type_data = chunk_data[2] if len(chunk_data) > 2 else None
@@ -900,18 +930,19 @@ def load_chunks():
             if key in world_faces:
                 continue
 
+            chunk_coord = _ensure_chunk(_chunk_coord_from_face(key[0], key[1]))
             world_faces.add(key)
-            face_to_chunk[key] = chunk_idx
+            face_to_chunk[key] = chunk_coord
             face_block_types[key] = btype
             base = _cube_base_from_face(key[0], key[1])
             if base not in block_types:
                 block_types[base] = btype
-            chunk_face_sets[chunk_idx].add(key)
+            chunk_face_sets[chunk_coord].add(key)
             _register_top_face(key[0], key[1])
 
-    for i in range(len(chunk_keys)):
-        _sync_chunk_lists(i)
-        _rebuild_chunk_mesh(i)
+    for chunk_coord in list(chunk_face_sets.keys()):
+        _sync_chunk_lists(chunk_coord)
+        _rebuild_chunk_mesh(chunk_coord)
 
     print(
         f"[gravity] faces={len(world_faces)} blocks={len(block_face_counts)} columns={len(top_columns)}"
@@ -952,10 +983,10 @@ def get_target_face(max_distance: int = 12):
         point = origin + direction * step
 
         chunk_key = _chunk_coord_from_pos(point)
-        chunk_idx = chunk_index.get(chunk_key)
-        if chunk_idx is None:
+        chunk_data = all_chunks.get(chunk_key)
+        if chunk_data is None:
             continue
-        _, faces, face_indices = all_chunks[chunk_idx]
+        _, faces, face_indices = chunk_data
 
         closest_face = None
         closest_idx = None
@@ -991,7 +1022,7 @@ def build():
         if opp in world_faces:
             _remove_face(opp, affected)  # opposite becomes internal
         elif same not in world_faces:
-            tgt = _chunk_index_from_pos(fp)
+            tgt = _chunk_coord_from_face(fp, i)
             _add_face(same, tgt, affected, selected_block_type)  # new outside face
 
     _refresh_chunks(affected)
@@ -1017,7 +1048,7 @@ def mine(face_pos=None, face_idx=None):
         if same in world_faces:
             _remove_face(same, affected)      # remove mined cube face
         else:
-            tgt = _chunk_index_from_pos(fp)
+            tgt = _chunk_coord_from_face(fp, _OPPOSITE_FACE[i])
             _add_face(opp, tgt, affected)     # expose neighbor face
 
     # Hard guarantee: the mined block itself must not keep any visible faces.
@@ -1028,7 +1059,7 @@ def mine(face_pos=None, face_idx=None):
             _remove_face(same, affected)
 
     # Force a full visual refresh to prevent stale/ghost faces.
-    _refresh_chunks(range(len(chunk_keys)))
+    _refresh_chunks(list(chunk_face_sets.keys()))
     c.y = -9999
 
 
@@ -1079,4 +1110,3 @@ def input(key):
 
 
 app.run()
-    
