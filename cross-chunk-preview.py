@@ -357,6 +357,18 @@ def _safe_clear_destroy(obj):
     if obj is None:
         return
     try:
+        obj.enabled = False
+    except:
+        pass
+    try:
+        obj.model = None
+    except:
+        pass
+    try:
+        obj.collider = None
+    except:
+        pass
+    try:
         obj.clear()
     except:
         pass
@@ -386,9 +398,9 @@ def _block_type_from_face_key(face_key):
 
 def _rebuild_chunk_mesh(chunk_idx):
     old = combined_terrains[chunk_idx]
-    _safe_clear_destroy(old)
 
     if len(chunk_face_sets[chunk_idx]) == 0:
+        _safe_clear_destroy(old)
         combined_terrains[chunk_idx] = None
         return
 
@@ -411,8 +423,20 @@ def _rebuild_chunk_mesh(chunk_idx):
         triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
 
     mesh = Mesh(vertices=vertices, triangles=triangles, uvs=uvs, normals=normals, mode="triangle", static=True)
-    combined = Entity(model=mesh, texture=atlas_texture if atlas_texture is not None else texture)
-    combined_terrains[chunk_idx] = combined
+    tex = atlas_texture if atlas_texture is not None else texture
+
+    if old is None:
+        combined_terrains[chunk_idx] = Entity(model=mesh, texture=tex)
+        return
+
+    try:
+        old.model = mesh
+        old.texture = tex
+        old.enabled = True
+        combined_terrains[chunk_idx] = old
+    except:
+        _safe_clear_destroy(old)
+        combined_terrains[chunk_idx] = Entity(model=mesh, texture=tex)
 
 
 def _refresh_chunks(affected_chunks):
@@ -426,6 +450,11 @@ def _refresh_chunks(affected_chunks):
 def _cube_base_from_face(pos_key, face_idx):
     off = _FACE_OFFSETS[int(face_idx)]
     return _vkey((pos_key[0] - off.x, pos_key[1] - off.y, pos_key[2] - off.z))
+
+
+def _face_pos_from_base(base, face_idx):
+    off = _FACE_OFFSETS[int(face_idx)]
+    return _vkey((base[0] + off.x, base[1] + off.y, base[2] + off.z))
 
 
 def _register_top_face(pos_key, face_idx):
@@ -787,18 +816,33 @@ def _remove_face(face_key, affected):
     if face_key not in world_faces:
         return False
     chunk_idx = face_to_chunk.get(face_key)
-    if chunk_idx is None:
-        return False
     base = _cube_base_from_face(face_key[0], face_key[1])
+    removed_from_chunk_set = False
+
+    if chunk_idx is not None and face_key in chunk_face_sets[chunk_idx]:
+        chunk_face_sets[chunk_idx].discard(face_key)
+        affected.add(chunk_idx)
+        removed_from_chunk_set = True
+    else:
+        for idx, fset in enumerate(chunk_face_sets):
+            if face_key in fset:
+                fset.discard(face_key)
+                affected.add(idx)
+                removed_from_chunk_set = True
+                break
 
     world_faces.discard(face_key)
     face_to_chunk.pop(face_key, None)
     face_block_types.pop(face_key, None)
-    chunk_face_sets[chunk_idx].discard(face_key)
     _unregister_top_face(face_key[0], face_key[1])
     if base not in block_face_counts:
         block_types.pop(base, None)
-    affected.add(chunk_idx)
+
+    # Safety net for desynced state: ensure visual mesh catches up.
+    if not removed_from_chunk_set:
+        for idx in range(len(chunk_face_sets)):
+            affected.add(idx)
+
     return True
 
 
@@ -962,11 +1006,11 @@ def mine(face_pos=None, face_idx=None):
             return
 
     # IMPORTANT: mine touched block itself (without +normal)
-    cube_base = Vec3(face_pos) - _FACE_OFFSETS[face_idx]
+    cube_base = _cube_base_from_face(face_pos, face_idx)
     affected = set()
 
-    for i, off in enumerate(_FACE_OFFSETS):
-        fp = cube_base + off
+    for i in range(len(_FACE_OFFSETS)):
+        fp = _face_pos_from_base(cube_base, i)
         same = _face_key(fp, i)
         opp = _face_key(fp, _OPPOSITE_FACE[i])
 
@@ -976,7 +1020,15 @@ def mine(face_pos=None, face_idx=None):
             tgt = _chunk_index_from_pos(fp)
             _add_face(opp, tgt, affected)     # expose neighbor face
 
-    _refresh_chunks(affected)
+    # Hard guarantee: the mined block itself must not keep any visible faces.
+    for i in range(len(_FACE_OFFSETS)):
+        fp = _face_pos_from_base(cube_base, i)
+        same = _face_key(fp, i)
+        if same in world_faces:
+            _remove_face(same, affected)
+
+    # Force a full visual refresh to prevent stale/ghost faces.
+    _refresh_chunks(range(len(chunk_keys)))
     c.y = -9999
 
 
@@ -1027,3 +1079,4 @@ def input(key):
 
 
 app.run()
+    
