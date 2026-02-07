@@ -26,17 +26,22 @@ amplitude = 1
 
 chunk_size = 16
 texture = "sand"
-chunk_net = [f"{i}{j}" for i in range(4) for j in range(4)]  # 4x4
 
-# all_chunks[chunk_idx] = [chunk_faces(xz list), chunk_faces2(xyz list), chunk_faces3(face_idx list)]
-all_chunks = [[[], [], []] for _ in chunk_net]
+GRID_X = 4
+GRID_Z = 4
+chunk_keys = [(cx, cz) for cx in range(GRID_X) for cz in range(GRID_Z)]
+chunk_index = {k: i for i, k in enumerate(chunk_keys)}
 
-# Fast structures
-chunk_face_sets = [set() for _ in chunk_net]   # set[((x,y,z), face_idx)] per chunk
+
+all_chunks = [[[], [], []] for _ in chunk_keys]
+chunk_face_sets = [set() for _ in chunk_keys]
+combined_terrains = [None for _ in chunk_keys]
+
+
 world_faces = set()                            # union of all chunk_face_sets
 face_to_chunk = {}                             # ((x,y,z), face_idx) -> chunk_idx
 
-combined_terrains = [None for _ in chunk_net]
+
 
 mode = 1
 c = Entity(model="cube", color=color.clear, collider="box")
@@ -91,11 +96,13 @@ def _face_rotation(face_idx):
     )
 
 
+def _chunk_coord_from_pos(pos):
+    cx = math.floor(float(pos[0]) / chunk_size)
+    cz = math.floor(float(pos[2]) / chunk_size)
+    return (cx, cz)
+
 def _chunk_index_from_pos(pos):
-    key = f"{int(pos[0] // chunk_size)}{int(pos[2] // chunk_size)}"
-    if key not in chunk_net:
-        return None
-    return chunk_net.index(key)
+    return chunk_index.get(_chunk_coord_from_pos(pos))
 
 
 def _safe_clear_destroy(obj):
@@ -191,7 +198,7 @@ def load_chunks():
     chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
 
     for chunk_idx, chunk_data in enumerate(chunks_opened_):
-        if chunk_idx >= len(chunk_net):
+        if chunk_idx >= len(chunk_keys):
             break
 
         positions = chunk_data[0]
@@ -210,7 +217,7 @@ def load_chunks():
             face_to_chunk[key] = chunk_idx
             chunk_face_sets[chunk_idx].add(key)
 
-    for i in range(len(chunk_net)):
+    for i in range(len(chunk_keys)):
         _sync_chunk_lists(i)
         _rebuild_chunk_mesh(i)
 
@@ -233,11 +240,10 @@ def get_target_face(max_distance: int = 12):
         step = i * 0.5
         point = origin + direction * step
 
-        chunk_key = f"{int(point.x // chunk_size)}{int(point.z // chunk_size)}"
-        if chunk_key not in chunk_net:
+        chunk_key = _chunk_coord_from_pos(point)
+        chunk_idx = chunk_index.get(chunk_key)
+        if chunk_idx is None:
             continue
-
-        chunk_idx = chunk_net.index(chunk_key)
         _, faces, face_indices = all_chunks[chunk_idx]
 
         closest_face = None
