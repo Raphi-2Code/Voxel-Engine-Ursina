@@ -9,7 +9,7 @@ from bisect import bisect_left, bisect_right
 
 app = Ursina()
 
-PLAYER_WIDTH = 0.6
+PLAYER_WIDTH = 0.5
 PLAYER_HEIGHT = 2.0
 
 player = FirstPersonController(gravity=0)
@@ -184,8 +184,8 @@ PROBE_THICK = 0.06
 PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
 PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
 
-PROBE_COLOR = color.rgba(128, 0, 0, 0.1)
-PROBE_HIT_COLOR = color.rgba(150, 0, 0, 0.1)
+PROBE_COLOR = color.clear
+PROBE_HIT_COLOR = color.clear
 EDGE_PROBE_NAMES = {
     "front_low", "front_high",
     "right_low", "right_high",
