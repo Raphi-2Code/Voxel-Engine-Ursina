@@ -800,7 +800,8 @@ def _sweep_z(start_z, target_z, x, y_min, y_max):
 def _resolve_horizontal_penetration(px, pz, y_min, y_max):
     radius = PLAYER_COLLISION_RADIUS
 
-    for _ in range(4):
+    # was 4; higher helps to resolve corner/edge stuck cases
+    for _ in range(12):
         moved = False
         min_x = px - radius
         max_x = px + radius
@@ -951,8 +952,6 @@ def _sample_player_probes_at(base_position, do_assign=True):
         sampled.append((name, center, local_half, yaw_off, hit, has_chunk_collider))
 
     if do_assign:
-        standing_on_collider = _player_stands_on_face_collider(base_position, hits)
-
         for name, center, local_half, yaw_off, hit, has_chunk_collider in sampled:
             probe = player_probe_entities[name]
             probe.position = center
@@ -962,11 +961,9 @@ def _sample_player_probes_at(base_position, do_assign=True):
             else:
                 probe.rotation = Vec3(0, base_yaw + yaw_off, 0)
 
-            enable_probe_collider = standing_on_collider and hit
-            if name in EDGE_PROBE_NAMES:
-                enable_probe_collider = enable_probe_collider and has_chunk_collider
-
-            probe.collider = "box" if enable_probe_collider else None
+            # FIX: probes are only sensors/debug visuals, never physical colliders.
+            # probe colliders caused side-sticking near block edges.
+            probe.collider = None
             probe.color = PROBE_HIT_COLOR if hit else PROBE_COLOR
 
     player_probe_hits.clear()
