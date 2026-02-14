@@ -1394,7 +1394,7 @@ def update():
     if face_pos:
         c2.position = _frame_position_for_target(face_pos, face_idx)
     else:
-        c2.position = floor(player.position + player.forward * 4)
+        c2.position = floor(player.position + (0, 10000, 0))
 
 
 def input(key):
