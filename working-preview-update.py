@@ -9,7 +9,7 @@ from bisect import bisect_left, bisect_right
 
 app = Ursina()
 
-PLAYER_WIDTH = 1.0
+PLAYER_WIDTH = 0.6
 PLAYER_HEIGHT = 2.0
 
 player = FirstPersonController(gravity=0)
@@ -179,7 +179,7 @@ MAX_PHYSICS_STEPS = 8
 # Probe faces around player
 PROBE_GRID_STEP = 1.0
 PROBE_YAW_STEP = 90.0
-PROBE_FACE_SIZE = 1.0
+PROBE_FACE_SIZE = PLAYER_WIDTH
 PROBE_THICK = 0.06
 PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
 PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
