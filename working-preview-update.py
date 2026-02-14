@@ -15,21 +15,17 @@ PLAYER_HEIGHT = 2.0
 player = FirstPersonController(gravity=0)
 player.speed = 20
 player.height = PLAYER_HEIGHT
-player.collider = BoxCollider(
-    player,
-    center=Vec3(0, PLAYER_HEIGHT * 0.5, 0),
-    size=Vec3(PLAYER_WIDTH, PLAYER_HEIGHT, PLAYER_WIDTH),
-)
+player.collider = None                          # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
 
 cube_faces = [
-    (0, 1, 0, 180, 0, 0),      # 0 bottom
-    (0, 2, 0, 0, 0, 0),        # 1 top
-    (0, 1.5, 0.5, 90, 0, 0),   # 2 +z
-    (0, 1.5, -0.5, -90, 0, 0), # 3 -z
-    (0.5, 1.5, 0, 0, 0, 90),   # 4 +x
-    (-0.5, 1.5, 0, 0, 0, -90), # 5 -x
+    (0, 1, 0, 180, 0, 0),
+    (0, 2, 0, 0, 0, 0),
+    (0, 1.5, 0.5, 90, 0, 0),
+    (0, 1.5, -0.5, -90, 0, 0),
+    (0.5, 1.5, 0, 0, 0, 90),
+    (-0.5, 1.5, 0, 0, 0, -90),
 ]
 
 seed = ord('y') + ord('o')
@@ -140,7 +136,7 @@ top_cells = {}
 block_face_counts = {}
 
 mode = 1
-c = Entity(model="cube", color=color.clear, collider="box")
+c = Entity(model="cube", color=color.clear)         # FIX: kein collider
 c2 = Entity(model="cube", texture="frame", scale=1.05)
 
 _FACE_NORMALS = {
@@ -173,19 +169,19 @@ PLAYER_COLLISION_HEAD_CLEARANCE = 0.1
 BLOCK_HALF_EXTENT = 0.5
 BLOCK_HEIGHT = float(_FACE_OFFSETS[1].y - _FACE_OFFSETS[0].y)
 WALL_EPS = 0.001
+SWEEP_TOL = 0.005
 MAX_PHYSICS_SUBSTEP = 1.0 / 120.0
 MAX_PHYSICS_STEPS = 8
 
-# Probe faces around player
 PROBE_GRID_STEP = 1.0
 PROBE_YAW_STEP = 90.0
-PROBE_FACE_SIZE = PLAYER_WIDTH
+PROBE_FACE_SIZE = PLAYER_WIDTH * 2
 PROBE_THICK = 0.06
-PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
-PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.05
+PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
+PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 
-PROBE_COLOR = color.clear
-PROBE_HIT_COLOR = color.clear
+PROBE_COLOR = color.white33
+PROBE_HIT_COLOR = color.white33
 EDGE_PROBE_NAMES = {
     "front_low", "front_high",
     "right_low", "right_high",
@@ -284,6 +280,39 @@ def _face_uvs(face_idx, block_type, quad_verts):
     dv = max(v1 - v0, 1e-8)
     out = []
 
+    for p in quad_verts:
+        vx = float(p.x)
+        vy = float(p.y)
+        vz = float(p.z)
+
+        if face_idx == 1:
+            lu = vx - x0
+            lv = z1 - vz
+        elif face_idx == 0:
+            lu = vx - x0
+            lv = vz - z0
+        elif face_idx == 2:
+            lu = vx - x0
+            lv = vy - y0
+        elif face_idx == 3:
+            lu = x1 - vx
+            lv = vy - y0
+        elif face_idx == 4:
+            lu = z1 - vz
+            lv = vy - y0
+        else:
+            lu = vz - z0
+            lv = vy - y0
+
+        lu = clamp(lu, 0.0, 1.0)
+        lv = clamp(lv, 0.0, 1.0)
+        out.append(Vec2(u0 + lu * du, v0 + lu * 0 + lv * dv))
+
+    # NOTE: obige Zeile v0 + lu*0 ist äquivalent zu v0; lässt es explizit linear wirken.
+    # Falls du lieber original willst: out.append(Vec2(u0 + lu * du, v0 + lv * dv))
+
+    # Korrektur auf exakt original:
+    out = []
     for p in quad_verts:
         vx = float(p.x)
         vy = float(p.y)
@@ -480,18 +509,18 @@ def _rebuild_chunk_mesh(chunk_coord):
     tex = atlas_texture if atlas_texture is not None else texture
 
     if old is None:
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, collider="mesh")
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)   # FIX: kein collider
         return
 
     try:
         old.model = mesh
         old.texture = tex
-        old.collider = "mesh"
+        old.collider = None                                                # FIX: kein collider
         old.enabled = True
         combined_terrains[chunk_coord] = old
     except:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, collider="mesh")
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)   # FIX: kein collider
 
 
 def _refresh_chunks(affected_chunks):
@@ -655,10 +684,10 @@ def _player_body_y_span():
 
 def _iter_candidate_columns(min_x, max_x, min_z, max_z):
     seen = set()
-    min_cx = math.floor(min_x)
-    max_cx = math.floor(max_x)
-    min_cz = math.floor(min_z)
-    max_cz = math.floor(max_z)
+    min_cx = math.floor(min_x - BLOCK_HALF_EXTENT)
+    max_cx = math.floor(max_x + BLOCK_HALF_EXTENT)
+    min_cz = math.floor(min_z - BLOCK_HALF_EXTENT)
+    max_cz = math.floor(max_z + BLOCK_HALF_EXTENT)
 
     for cx in range(min_cx, max_cx + 1):
         for cz in range(min_cz, max_cz + 1):
@@ -752,7 +781,7 @@ def _sweep_x(start_x, target_x, z, y_min, y_max):
             if max_z <= bz0 or min_z >= bz1:
                 continue
             boundary = bx0 - radius
-            if start_x <= boundary and target_x > boundary and boundary < limit:
+            if start_x <= boundary + SWEEP_TOL and target_x > boundary and boundary < limit:
                 limit = boundary - WALL_EPS
         return limit
 
@@ -761,7 +790,7 @@ def _sweep_x(start_x, target_x, z, y_min, y_max):
         if max_z <= bz0 or min_z >= bz1:
             continue
         boundary = bx1 + radius
-        if start_x >= boundary and target_x < boundary and boundary > limit:
+        if start_x >= boundary - SWEEP_TOL and target_x < boundary and boundary > limit:
             limit = boundary + WALL_EPS
     return limit
 
@@ -783,7 +812,7 @@ def _sweep_z(start_z, target_z, x, y_min, y_max):
             if max_x <= bx0 or min_x >= bx1:
                 continue
             boundary = bz0 - radius
-            if start_z <= boundary and target_z > boundary and boundary < limit:
+            if start_z <= boundary + SWEEP_TOL and target_z > boundary and boundary < limit:
                 limit = boundary - WALL_EPS
         return limit
 
@@ -792,7 +821,7 @@ def _sweep_z(start_z, target_z, x, y_min, y_max):
         if max_x <= bx0 or min_x >= bx1:
             continue
         boundary = bz1 + radius
-        if start_z >= boundary and target_z < boundary and boundary > limit:
+        if start_z >= boundary - SWEEP_TOL and target_z < boundary and boundary > limit:
             limit = boundary + WALL_EPS
     return limit
 
@@ -800,7 +829,6 @@ def _sweep_z(start_z, target_z, x, y_min, y_max):
 def _resolve_horizontal_penetration(px, pz, y_min, y_max):
     radius = PLAYER_COLLISION_RADIUS
 
-    # was 4; higher helps to resolve corner/edge stuck cases
     for _ in range(12):
         moved = False
         min_x = px - radius
@@ -885,9 +913,10 @@ def _ensure_player_probes():
         e = Entity(
             model="cube",
             color=PROBE_COLOR,
-            collider=None,
+            collider="box",      # FIX: Collider vorhanden
             scale=half * 2,
         )
+        e.collision = False      # FIX: nur aktiv, wenn Hit auf Chunk-Face/Block
         player_probe_entities[name] = e
         player_probe_hits[name] = False
 
@@ -961,9 +990,9 @@ def _sample_player_probes_at(base_position, do_assign=True):
             else:
                 probe.rotation = Vec3(0, base_yaw + yaw_off, 0)
 
-            # FIX: probes are only sensors/debug visuals, never physical colliders.
-            # probe colliders caused side-sticking near block edges.
-            probe.collider = None
+            # FIX: Collider bleibt vorhanden, Collision nur wenn Probe wirklich auf Block/Face liegt
+            probe.collision = bool(hit)
+
             probe.color = PROBE_HIT_COLOR if hit else PROBE_COLOR
 
     player_probe_hits.clear()
@@ -984,8 +1013,16 @@ def _apply_player_probe_horizontal():
         return
 
     y_min, y_max = _player_body_y_span()
-    res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
-    res_z = _sweep_z(prev_horizontal_z, cur_z, res_x, y_min, y_max)
+
+    dx = cur_x - prev_horizontal_x                                        # FIX: größere Achse zuerst
+    dz = cur_z - prev_horizontal_z
+    if abs(dx) >= abs(dz):
+        res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
+        res_z = _sweep_z(prev_horizontal_z, cur_z, res_x, y_min, y_max)
+    else:
+        res_z = _sweep_z(prev_horizontal_z, cur_z, prev_horizontal_x, y_min, y_max)
+        res_x = _sweep_x(prev_horizontal_x, cur_x, res_z, y_min, y_max)
+
     res_x, res_z = _resolve_horizontal_penetration(res_x, res_z, y_min, y_max)
 
     _sample_player_probes_at(Vec3(res_x, float(player.y), res_z), do_assign=False)
