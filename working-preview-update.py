@@ -39,7 +39,7 @@ amplitude = 1
 
 chunk_size = 16
 chunk_height = 16
-texture = "atlas"
+texture = "atlas0"
 
 ATLAS_TILES_X = 4
 ATLAS_TILES_Y = 4
@@ -141,7 +141,7 @@ block_face_counts = {}
 
 mode = 1
 c = Entity(model="cube", color=color.clear, collider="box")
-c2 = Entity(model="cube", texture="frame")
+c2 = Entity(model="cube", texture="frame", scale=1.05)
 
 _FACE_NORMALS = {
     0: Vec3(0, -1, 0),
@@ -1380,14 +1380,19 @@ def mine(face_pos=None, face_idx=None):
     c.y = -9999
 
 
+def _frame_position_for_target(face_pos, face_idx):
+    hit_base = _cube_base_from_face(face_pos, face_idx)
+    return Vec3(hit_base[0], hit_base[1] + 1.5, hit_base[2])
+
+
 def update():
     _apply_player_probe_horizontal()
     _apply_vector_gravity()
     _snap_player_y_to_grid()
 
-    face_pos, _, _ = get_target_face()
+    face_pos, _, face_idx = get_target_face()
     if face_pos:
-        c2.position = Vec3(round(face_pos[0]), round(face_pos[1]), round(face_pos[2])) + (0, -0.5, 0)
+        c2.position = _frame_position_for_target(face_pos, face_idx)
     else:
         c2.position = floor(player.position + player.forward * 4)
 
