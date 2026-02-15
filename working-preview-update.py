@@ -10,11 +10,13 @@ from bisect import bisect_left, bisect_right
 app = Ursina()
 
 PLAYER_WIDTH = 0.5
-PLAYER_HEIGHT = 2.0
+PLAYER_HEIGHT = 1.5
 
 player = FirstPersonController(gravity=0)
 player.speed = 20
 player.height = PLAYER_HEIGHT
+player.camera_pivot.y = 1.2
+
 player.collider = None                          # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
@@ -164,8 +166,11 @@ GROUND_STICK = 0.08
 MAX_STEP_UP = 0.35
 PLAYER_COLLISION_RADIUS = PLAYER_WIDTH * 0.5
 PLAYER_FOOT_RADIUS = PLAYER_COLLISION_RADIUS
-PLAYER_COLLISION_FOOT_CLEARANCE = 0.02
-PLAYER_COLLISION_HEAD_CLEARANCE = 0.1
+
+# FIX (Claude): Clearance-Werte reduzieren
+PLAYER_COLLISION_FOOT_CLEARANCE = 0.005
+PLAYER_COLLISION_HEAD_CLEARANCE = 0.005
+
 BLOCK_HALF_EXTENT = 0.5
 BLOCK_HEIGHT = float(_FACE_OFFSETS[1].y - _FACE_OFFSETS[0].y)
 WALL_EPS = 0.001
@@ -180,8 +185,8 @@ PROBE_THICK = 0.06
 PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 
-PROBE_COLOR = color.white33
-PROBE_HIT_COLOR = color.white33
+PROBE_COLOR = color.clear #white33
+PROBE_HIT_COLOR = color.clear #white33
 EDGE_PROBE_NAMES = {
     "front_low", "front_high",
     "right_low", "right_high",
@@ -1062,6 +1067,18 @@ def _block_intersects_player(base):
     return (dx * dx + dz * dz) <= (PLAYER_COLLISION_RADIUS * PLAYER_COLLISION_RADIUS)
 
 
+# FIX (Claude): Neue Funktion _can_stand_at hinzufügen
+def _can_stand_at(px, pz, foot_y):
+    """Prüft ob der Spieler an dieser Position frei von Blöcken ist."""
+    y_min = foot_y + PLAYER_COLLISION_FOOT_CLEARANCE
+    y_max = foot_y + PLAYER_HEIGHT - PLAYER_COLLISION_HEAD_CLEARANCE
+    min_x = px - PLAYER_COLLISION_RADIUS
+    max_x = px + PLAYER_COLLISION_RADIUS
+    min_z = pz - PLAYER_COLLISION_RADIUS
+    max_z = pz + PLAYER_COLLISION_RADIUS
+    return not _aabb_hits_any_block(min_x, max_x, y_min, y_max, min_z, max_z)
+
+
 def _apply_vector_gravity():
     global vertical_velocity, is_grounded
     dt_total = time.dt
@@ -1085,7 +1102,10 @@ def _apply_vector_gravity():
         if support_y is None and len(block_face_counts) > 0:
             support_y = _find_support_y_fallback(px, pz, current_foot, support_scan_up)
 
+        # FIX (Claude): Snap-Validierung
         if support_y is not None and current_foot < support_y:
+            if not _can_stand_at(px, pz, support_y):
+                continue
             player.y = support_y + PLAYER_STAND_HEIGHT
             vertical_velocity = 0.0
             is_grounded = True
@@ -1126,6 +1146,9 @@ def _apply_vector_gravity():
             if snap is None:
                 snap = support_y
             if snap is not None and next_foot <= snap + 0.25:
+                # FIX: auch diesen Snap validieren (verhindert "rein-snappen" in zu niedrige Lücken)
+                if not _can_stand_at(px, pz, snap):
+                    continue
                 player.y = snap + PLAYER_STAND_HEIGHT
                 vertical_velocity = 0.0
                 is_grounded = True
