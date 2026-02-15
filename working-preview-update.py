@@ -15,7 +15,7 @@ PLAYER_HEIGHT = 1.5
 player = FirstPersonController(gravity=0)
 player.speed = 20
 player.height = PLAYER_HEIGHT
-player.camera_pivot.y = 1.2
+player.camera_pivot.y = 1.9
 
 player.collider = None                          # FIX: keine Ursina-Kollision
 
@@ -131,6 +131,9 @@ for coord in base_chunk_coords:
 world_faces = set()
 face_to_chunk = {}
 face_block_types = {}
+
+# WICHTIG: block_types bleibt jetzt persistent, auch wenn ein Block komplett gecullt ist
+# (also 0 Faces hat). Gelöscht wird er nur beim tatsächlichen Abbauen.
 block_types = {}
 
 top_columns = {}
@@ -1164,7 +1167,6 @@ def _remove_face(face_key, affected):
     if face_key not in world_faces:
         return False
     chunk_coord = face_to_chunk.get(face_key)
-    base = _cube_base_from_face(face_key[0], face_key[1])
     removed_from_chunk_set = False
 
     if chunk_coord is not None and chunk_coord in chunk_face_sets and face_key in chunk_face_sets[chunk_coord]:
@@ -1183,8 +1185,10 @@ def _remove_face(face_key, affected):
     face_to_chunk.pop(face_key, None)
     face_block_types.pop(face_key, None)
     _unregister_top_face(face_key[0], face_key[1])
-    if base not in block_face_counts:
-        block_types.pop(base, None)
+
+    # WICHTIG:
+    # block_types wird NICHT mehr gelöscht, nur weil ein Block komplett gecullt ist (0 Faces).
+    # Sonst resettet der Typ beim späteren Freilegen auf DEFAULT_BLOCK_TYPE.
 
     if not removed_from_chunk_set:
         affected.update(chunk_face_sets.keys())
@@ -1388,11 +1392,22 @@ def get_target_face(max_distance: int = 12):
 
 def build():
     cube_base = Vec3(c.position) + Vec3(0, -1.5, 0)
-    if _block_intersects_player(cube_base):
+    base_key = _vkey(cube_base)
+    cube_base = Vec3(*base_key)
+
+    # NEU: nicht "in" einen existierenden Block bauen (auch wenn er gerade komplett gecullt ist)
+    if base_key in block_types:
+        c.y = -9999
+        return
+
+    if _block_intersects_player(base_key):
         c.y = -9999
         return
 
     affected = set()
+
+    # NEU: Blocktyp sofort persistent speichern (wichtig, wenn der Block sofort komplett gecullt ist)
+    block_types[base_key] = _normalize_block_type(selected_block_type)
 
     for i, off in enumerate(_FACE_OFFSETS):
         fp = cube_base + off
@@ -1403,7 +1418,7 @@ def build():
             _remove_face(opp, affected)
         elif same not in world_faces:
             tgt = _chunk_coord_from_face(fp, i)
-            _add_face(same, tgt, affected, selected_block_type)
+            _add_face(same, tgt, affected)  # Typ kommt aus block_types[base_key]
 
     _refresh_chunks(affected)
     c.y = -9999
@@ -1435,6 +1450,9 @@ def mine(face_pos=None, face_idx=None):
         same = _face_key(fp, i)
         if same in world_faces:
             _remove_face(same, affected)
+
+    # NEU: Block wirklich abgebaut -> Typ aus dem persistenten Speicher entfernen
+    block_types.pop(cube_base, None)
 
     _refresh_chunks(_expand_chunk_neighborhood(affected, radius=1))
     c.y = -9999
