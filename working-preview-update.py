@@ -164,6 +164,10 @@ _OPPOSITE_FACE = {
 GRAVITY_ACCEL = 35.0
 MAX_FALL_SPEED = 55.0
 JUMP_SPEED = 11.5
+
+# NEU: Sprung nur erlauben, wenn über dem Kopf genug Platz ist
+MIN_HEADROOM_TO_JUMP = 1.0
+
 PLAYER_STAND_HEIGHT = 0.0
 GROUND_STICK = 0.08
 MAX_STEP_UP = 0.35
@@ -770,6 +774,19 @@ def _chunk_has_collider(chunk_coord):
     if not getattr(ent, "enabled", True):
         return False
     return getattr(ent, "collider", None) is not None
+
+
+# NEU: Jump blockieren, wenn direkt über dem Kopf ein Block ist
+def _jump_blocked_by_ceiling():
+    _, head_y = _player_body_y_span()
+    px = float(player.x)
+    pz = float(player.z)
+    r = PLAYER_COLLISION_RADIUS
+    return _aabb_hits_any_block(
+        px - r, px + r,
+        head_y, head_y + MIN_HEADROOM_TO_JUMP,
+        pz - r, pz + r
+    )
 
 
 def _sweep_x(start_x, target_x, z, y_min, y_max):
@@ -1488,9 +1505,16 @@ def input(key):
         player.y -= 1
         vertical_velocity = 0.0
         _snap_player_y_to_grid(force=True)
+
+    # GEÄNDERT: Sprung nur, wenn über dem Kopf frei ist
     if key == "space" and is_grounded:
-        vertical_velocity = JUMP_SPEED
-        is_grounded = False
+        if _jump_blocked_by_ceiling():
+            vertical_velocity = 0.0
+            # is_grounded bleibt True
+        else:
+            vertical_velocity = JUMP_SPEED
+            is_grounded = False
+
     if key == "e":
         player.enabled = not player.enabled
         print(len(scene.entities))
