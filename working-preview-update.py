@@ -17,7 +17,7 @@ player.speed = 20
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
 
-player.collider = None                          # FIX: keine Ursina-Kollision
+player.collider = None  # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
 
@@ -30,7 +30,7 @@ cube_faces = [
     (-0.5, 1.5, 0, 0, 0, -90),
 ]
 
-seed = ord('y') + ord('o')
+seed = ord("y") + ord("o")
 octaves = 0.5
 frequency = 8
 amplitude = 1
@@ -56,6 +56,14 @@ BLOCK_FACE_TILES = {
         3: (1, 0),
         4: (1, 0),
         5: (1, 0),
+    },
+    "dirt": {
+        0: (2, 0),
+        1: (2, 0),
+        2: (2, 0),
+        3: (2, 0),
+        4: (2, 0),
+        5: (2, 0),
     },
     "stone": {
         0: (3, 0),
@@ -107,6 +115,7 @@ BLOCK_SELECT_KEYS = {
     "6": "planks",
     "7": "leaves",
     "8": "water",
+    "9": "dirt",
 }
 
 atlas_texture = load_texture(texture)
@@ -141,7 +150,7 @@ top_cells = {}
 block_face_counts = {}
 
 mode = 1
-c = Entity(model="cube", color=color.clear)         # FIX: kein collider
+c = Entity(model="cube", color=color.clear)  # FIX: kein collider
 c2 = Entity(model="cube", texture="frame", scale=1.05)
 
 _FACE_NORMALS = {
@@ -156,9 +165,12 @@ _FACE_NORMALS = {
 _FACE_OFFSETS = [Vec3(*cf[:3]) for cf in cube_faces]
 
 _OPPOSITE_FACE = {
-    0: 1, 1: 0,
-    2: 3, 3: 2,
-    4: 5, 5: 4,
+    0: 1,
+    1: 0,
+    2: 3,
+    3: 2,
+    4: 5,
+    5: 4,
 }
 
 GRAVITY_ACCEL = 35.0
@@ -185,9 +197,6 @@ SWEEP_TOL = 0.005
 MAX_PHYSICS_SUBSTEP = 1.0 / 120.0
 MAX_PHYSICS_STEPS = 8
 
-# Anti-Stuck: kurzer Nudge in Bewegungsrichtung, wenn man im Block steckt.
-
-
 PROBE_GRID_STEP = 1.0
 PROBE_YAW_STEP = 90.0
 PROBE_FACE_SIZE = PLAYER_WIDTH * 2
@@ -195,13 +204,17 @@ PROBE_THICK = 0.06
 PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 
-PROBE_COLOR = color.clear #white33
-PROBE_HIT_COLOR = color.clear #white33
+PROBE_COLOR = color.clear  # white33
+PROBE_HIT_COLOR = color.clear  # white33
 EDGE_PROBE_NAMES = {
-    "front_low", "front_high",
-    "right_low", "right_high",
-    "left_low", "left_high",
-    "back_low", "back_high",
+    "front_low",
+    "front_high",
+    "right_low",
+    "right_high",
+    "left_low",
+    "left_high",
+    "back_low",
+    "back_high",
 }
 PLAYER_Y_SNAP_STEP = PROBE_GRID_STEP
 PLAYER_Y_SNAP_ONLY_GROUNDED = True
@@ -239,11 +252,7 @@ def _face_key(pos, face_idx):
 
 
 def _face_rotation(face_idx):
-    return (
-        cube_faces[face_idx][3],
-        cube_faces[face_idx][4],
-        cube_faces[face_idx][5],
-    )
+    return (cube_faces[face_idx][3], cube_faces[face_idx][4], cube_faces[face_idx][5])
 
 
 def _normalize_block_type(block_type):
@@ -485,12 +494,36 @@ def _sync_chunk_lists(chunk_coord):
     all_chunks[chunk_coord] = [faces, faces2, faces3]
 
 
+def _set_block_type(base, block_type):
+    btype = _normalize_block_type(block_type)
+    block_types[base] = btype
+    for i in range(len(_FACE_OFFSETS)):
+        fp = _face_pos_from_base(base, i)
+        fk = _face_key(fp, i)
+        if fk in face_block_types:
+            face_block_types[fk] = btype
+
+
+def _apply_surface_layers():
+    top_y_by_col = {}
+    for base in block_types.keys():
+        col = (base[0], base[2])
+        y = base[1]
+        prev = top_y_by_col.get(col)
+        if prev is None or y > prev:
+            top_y_by_col[col] = y
+
+    for base, btype in list(block_types.items()):
+        if _normalize_block_type(btype) != "grass":
+            continue
+        col = (base[0], base[2])
+        if base[1] < top_y_by_col[col]:
+            _set_block_type(base, "dirt")
+
+
 def _block_type_from_face_key(face_key):
-    btype = face_block_types.get(face_key)
-    if btype is not None:
-        return btype
     base = _cube_base_from_face(face_key[0], face_key[1])
-    return block_types.get(base, DEFAULT_BLOCK_TYPE)
+    return _normalize_block_type(block_types.get(base, DEFAULT_BLOCK_TYPE))
 
 
 def _rebuild_chunk_mesh(chunk_coord):
@@ -520,22 +553,29 @@ def _rebuild_chunk_mesh(chunk_coord):
         normals.extend([n, n, n, n])
         triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
 
-    mesh = Mesh(vertices=vertices, triangles=triangles, uvs=uvs, normals=normals, mode="triangle", static=True)
+    mesh = Mesh(
+        vertices=vertices,
+        triangles=triangles,
+        uvs=uvs,
+        normals=normals,
+        mode="triangle",
+        static=True,
+    )
     tex = atlas_texture if atlas_texture is not None else texture
 
     if old is None:
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)   # FIX: kein collider
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)  # FIX: kein collider
         return
 
     try:
         old.model = mesh
         old.texture = tex
-        old.collider = None                                                # FIX: kein collider
+        old.collider = None  # FIX: kein collider
         old.enabled = True
         combined_terrains[chunk_coord] = old
     except:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)   # FIX: kein collider
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)  # FIX: kein collider
 
 
 def _refresh_chunks(affected_chunks):
@@ -785,11 +825,7 @@ def _jump_blocked_by_ceiling():
     px = float(player.x)
     pz = float(player.z)
     r = PLAYER_COLLISION_RADIUS
-    return _aabb_hits_any_block(
-        px - r, px + r,
-        head_y, head_y + MIN_HEADROOM_TO_JUMP,
-        pz - r, pz + r
-    )
+    return _aabb_hits_any_block(px - r, px + r, head_y, head_y + MIN_HEADROOM_TO_JUMP, pz - r, pz + r)
 
 
 def _sweep_x(start_x, target_x, z, y_min, y_max):
@@ -941,10 +977,10 @@ def _ensure_player_probes():
         e = Entity(
             model="cube",
             color=PROBE_COLOR,
-            collider="box",      # FIX: Collider vorhanden
+            collider="box",  # FIX: Collider vorhanden
             scale=half * 2,
         )
-        e.collision = False      # FIX: nur aktiv, wenn Hit auf Chunk-Face/Block
+        e.collision = False  # FIX: nur aktiv, wenn Hit auf Chunk-Face/Block
         player_probe_entities[name] = e
         player_probe_hits[name] = False
 
@@ -1018,9 +1054,7 @@ def _sample_player_probes_at(base_position, do_assign=True):
             else:
                 probe.rotation = Vec3(0, base_yaw + yaw_off, 0)
 
-            # FIX: Collider bleibt vorhanden, Collision nur wenn Probe wirklich auf Block/Face liegt
             probe.collision = bool(hit)
-
             probe.color = PROBE_HIT_COLOR if hit else PROBE_COLOR
 
     player_probe_hits.clear()
@@ -1042,7 +1076,7 @@ def _apply_player_probe_horizontal():
 
     y_min, y_max = _player_body_y_span()
 
-    dx = cur_x - prev_horizontal_x                                        # FIX: größere Achse zuerst
+    dx = cur_x - prev_horizontal_x  # FIX: größere Achse zuerst
     dz = cur_z - prev_horizontal_z
     if abs(dx) >= abs(dz):
         res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
@@ -1100,8 +1134,9 @@ def _can_stand_at(px, pz, foot_y):
     min_z = pz - PLAYER_COLLISION_RADIUS
     max_z = pz + PLAYER_COLLISION_RADIUS
     return not _aabb_hits_any_block(min_x, max_x, y_min, y_max, min_z, max_z)
+
+
 def _has_block_in_direction(dir_vec, distance=PROBE_FRONT_OFFSET, half_y=0.35):
-    # Nur horizontal prüfen
     d = Vec3(float(dir_vec.x), 0.0, float(dir_vec.z))
     if d.length_squared() < 1e-8:
         return False
@@ -1111,7 +1146,6 @@ def _has_block_in_direction(dir_vec, distance=PROBE_FRONT_OFFSET, half_y=0.35):
     pz = float(player.z) + d.z * distance
     r = PLAYER_COLLISION_RADIUS
 
-    # Zwei Höhen prüfen (unten + oben), damit "Face/Probe"-Kanten erkannt werden
     y_low = float(player.y) + 0.65
     y_high = float(player.y) + min(float(player.height) - 0.2, 1.55)
 
@@ -1127,18 +1161,15 @@ def get_neighbor_block_hits(distance=PROBE_FRONT_OFFSET):
         "left": _has_block_in_direction(player.left, distance),
         "right": _has_block_in_direction(player.right, distance),
     }
+
+
 def get_front_back_left_right_hits(direction=None, distance=PROBE_FRONT_OFFSET, half_y=0.35):
     r = PLAYER_COLLISION_RADIUS
     y_low = float(player.y) + 0.65
     y_high = float(player.y) + min(float(player.height) - 0.2, 1.55)
 
     hits = {}
-    for name, dir_vec in (
-        ("front", player.forward),
-        ("back", player.back),
-        ("left", player.left),
-        ("right", player.right),
-    ):
+    for name, dir_vec in (("front", player.forward), ("back", player.back), ("left", player.left), ("right", player.right)):
         d = Vec3(float(dir_vec.x), 0.0, float(dir_vec.z))
         if d.length_squared() < 1e-8:
             hits[name] = False
@@ -1153,10 +1184,11 @@ def get_front_back_left_right_hits(direction=None, distance=PROBE_FRONT_OFFSET, 
         hits[name] = low_hit or high_hit
 
     if direction is None:
-        return hits  # alle 4 zurück
+        return hits
 
     key = str(direction).strip().lower()
-    return hits.get(key, False)  # ungültige Richtung => False
+    return hits.get(key, False)
+
 
 def _movement_input_dir_xz():
     yaw = math.radians(float(player.rotation_y))
@@ -1189,8 +1221,6 @@ def _movement_input_dir_xz():
     return mx * inv_len, mz * inv_len
 
 
-
-
 def _apply_vector_gravity():
     global vertical_velocity, is_grounded
     dt_total = time.dt
@@ -1214,7 +1244,6 @@ def _apply_vector_gravity():
         if support_y is None and len(block_face_counts) > 0:
             support_y = _find_support_y_fallback(px, pz, current_foot, support_scan_up)
 
-        # FIX (Claude): Snap-Validierung
         if support_y is not None and current_foot < support_y:
             if not _can_stand_at(px, pz, support_y):
                 continue
@@ -1258,7 +1287,6 @@ def _apply_vector_gravity():
             if snap is None:
                 snap = support_y
             if snap is not None and next_foot <= snap + 0.25:
-                # FIX: auch diesen Snap validieren (verhindert "rein-snappen" in zu niedrige Lücken)
                 if not _can_stand_at(px, pz, snap):
                     continue
                 player.y = snap + PLAYER_STAND_HEIGHT
@@ -1295,23 +1323,38 @@ def _remove_face(face_key, affected):
     face_block_types.pop(face_key, None)
     _unregister_top_face(face_key[0], face_key[1])
 
-    # WICHTIG:
-    # block_types wird NICHT mehr gelöscht, nur weil ein Block komplett gecullt ist (0 Faces).
-    # Sonst resettet der Typ beim späteren Freilegen auf DEFAULT_BLOCK_TYPE.
-
     if not removed_from_chunk_set:
         affected.update(chunk_face_sets.keys())
 
     return True
 
 
+def _infer_block_type_for_hidden_block(base):
+    above = _vkey((base[0], base[1] + BLOCK_HEIGHT, base[2]))
+    above_type = block_types.get(above)
+
+    if above_type is not None:
+        above_type = _normalize_block_type(above_type)
+        if above_type in ("grass", "dirt"):
+            return "dirt"
+        return above_type
+
+    return "dirt"
+
+
 def _add_face(face_key, chunk_coord, affected, block_type=None):
     chunk_coord = _ensure_chunk(chunk_coord)
     if face_key in world_faces:
         return False
+
     base = _cube_base_from_face(face_key[0], face_key[1])
+
     if block_type is None:
-        block_type = block_types.get(base, DEFAULT_BLOCK_TYPE)
+        if base in block_types:
+            block_type = block_types[base]
+        else:
+            block_type = _infer_block_type_for_hidden_block(base)
+
     block_type = _normalize_block_type(block_type)
 
     world_faces.add(face_key)
@@ -1364,6 +1407,8 @@ def load_chunks():
                 block_types[base] = btype
             chunk_face_sets[chunk_coord].add(key)
             _register_top_face(key[0], key[1])
+
+    _apply_surface_layers()
 
     for chunk_coord in list(chunk_face_sets.keys()):
         _rebuild_chunk_mesh(chunk_coord)
@@ -1504,7 +1549,6 @@ def build():
     base_key = _vkey(cube_base)
     cube_base = Vec3(*base_key)
 
-    # NEU: nicht "in" einen existierenden Block bauen (auch wenn er gerade komplett gecullt ist)
     if base_key in block_types:
         c.y = -9999
         return
@@ -1515,8 +1559,11 @@ def build():
 
     affected = set()
 
-    # NEU: Blocktyp sofort persistent speichern (wichtig, wenn der Block sofort komplett gecullt ist)
-    block_types[base_key] = _normalize_block_type(selected_block_type)
+    _set_block_type(base_key, selected_block_type)
+
+    below = _vkey((base_key[0], base_key[1] - BLOCK_HEIGHT, base_key[2]))
+    if below in block_types and _normalize_block_type(block_types[below]) == "grass":
+        _set_block_type(below, "dirt")
 
     for i, off in enumerate(_FACE_OFFSETS):
         fp = cube_base + off
@@ -1527,7 +1574,7 @@ def build():
             _remove_face(opp, affected)
         elif same not in world_faces:
             tgt = _chunk_coord_from_face(fp, i)
-            _add_face(same, tgt, affected)  # Typ kommt aus block_types[base_key]
+            _add_face(same, tgt, affected)
 
     _refresh_chunks(affected)
     c.y = -9999
@@ -1560,8 +1607,11 @@ def mine(face_pos=None, face_idx=None):
         if same in world_faces:
             _remove_face(same, affected)
 
-    # NEU: Block wirklich abgebaut -> Typ aus dem persistenten Speicher entfernen
     block_types.pop(cube_base, None)
+
+    below = _vkey((cube_base[0], cube_base[1] - BLOCK_HEIGHT, cube_base[2]))
+    if below in block_types and _normalize_block_type(block_types[below]) == "grass":
+        _set_block_type(below, "dirt")
 
     _refresh_chunks(_expand_chunk_neighborhood(affected, radius=1))
     c.y = -9999
@@ -1574,7 +1624,6 @@ def _frame_position_for_target(face_pos, face_idx):
 
 def update():
     _apply_player_probe_horizontal()
-
     _apply_vector_gravity()
     _snap_player_y_to_grid()
 
@@ -1588,30 +1637,70 @@ def update():
 def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
     global prev_horizontal_x, prev_horizontal_z
+
     print("Gay")
     move_dir = True
-    if get_front_back_left_right_hits("back"): print("back");  move_dir = Vec3(player.forward) if key=="w" else Vec3(player.forward) if key=="s" else Vec3(player.forward) if key=="d" else Vec3(player.forward) if key=="a" else True  # _movement_input_dir_xz()
-    if get_front_back_left_right_hits("front"): print("front"); move_dir = Vec3(player.back) if key=="w" else Vec3(player.back) if key=="s" else Vec3(player.back) if key=="d" else Vec3(player.back) if key=="a" else True  # _movement_input_dir_xz()
-    if get_front_back_left_right_hits("right"):  print("right");  move_dir = Vec3(player.left) if key=="s" else Vec3(player.left) if key=="w" else Vec3(player.left) if key=="a" else Vec3(player.left) if key=="d" else True
-    if get_front_back_left_right_hits("left"): print("left"); move_dir = Vec3(player.right) if key=="w" else Vec3(player.right) if key=="s" else Vec3(player.right) if key=="d" else Vec3(player.right) if key=="a" else True
+    if get_front_back_left_right_hits("back"):
+        print("back")
+        move_dir = (
+            Vec3(player.forward)
+            if key == "w"
+            else Vec3(player.forward)
+            if key == "s"
+            else Vec3(player.forward)
+            if key == "d"
+            else Vec3(player.forward)
+            if key == "a"
+            else True
+        )
+    if get_front_back_left_right_hits("front"):
+        print("front")
+        move_dir = (
+            Vec3(player.back)
+            if key == "w"
+            else Vec3(player.back)
+            if key == "s"
+            else Vec3(player.back)
+            if key == "d"
+            else Vec3(player.back)
+            if key == "a"
+            else True
+        )
+    if get_front_back_left_right_hits("right"):
+        print("right")
+        move_dir = (
+            Vec3(player.left)
+            if key == "s"
+            else Vec3(player.left)
+            if key == "w"
+            else Vec3(player.left)
+            if key == "a"
+            else Vec3(player.left)
+            if key == "d"
+            else True
+        )
+    if get_front_back_left_right_hits("left"):
+        print("left")
+        move_dir = (
+            Vec3(player.right)
+            if key == "w"
+            else Vec3(player.right)
+            if key == "s"
+            else Vec3(player.right)
+            if key == "d"
+            else Vec3(player.right)
+            if key == "a"
+            else True
+        )
     print(move_dir)
 
     if isinstance(move_dir, Vec3):
         px = float(player.x)
         pz = float(player.z)
-        foot_y = float(player.y) - PLAYER_STAND_HEIGHT
-
-        # Nur eingreifen, wenn der Spieler aktuell nicht frei steht.
-        # if _can_stand_at(px, pz, foot_y):
-        #    return False
 
         print(move_dir)
         nx = px + move_dir[0] * player.speed * time.dt
         nz = pz + move_dir[2] * player.speed * time.dt
-        
-        # ny = pz + move_dir[1] * ANTI_STUCK_NUDGE_DISTANCE
-
-        # Nur nudge, wenn das Ziel in Bewegungsrichtung frei ist.
 
         print("lol")
         player.x = nx
@@ -1620,6 +1709,7 @@ def input(key):
         prev_horizontal_z = nz
         _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
         return True
+
     if key == "o":
         mode = 1 - mode
     if key == "m" or key == "m hold":
@@ -1631,11 +1721,9 @@ def input(key):
         vertical_velocity = 0.0
         _snap_player_y_to_grid(force=True)
 
-    # GEÄNDERT: Sprung nur, wenn über dem Kopf frei ist
     if key == "space" and is_grounded:
         if _jump_blocked_by_ceiling():
             vertical_velocity = 0.0
-            # is_grounded bleibt True
         else:
             vertical_velocity = JUMP_SPEED
             is_grounded = False
