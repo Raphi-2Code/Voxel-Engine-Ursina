@@ -185,6 +185,9 @@ SWEEP_TOL = 0.005
 MAX_PHYSICS_SUBSTEP = 1.0 / 120.0
 MAX_PHYSICS_STEPS = 8
 
+# Anti-Stuck: kurzer Nudge in Bewegungsrichtung, wenn man im Block steckt.
+
+
 PROBE_GRID_STEP = 1.0
 PROBE_YAW_STEP = 90.0
 PROBE_FACE_SIZE = PLAYER_WIDTH * 2
@@ -1097,6 +1100,95 @@ def _can_stand_at(px, pz, foot_y):
     min_z = pz - PLAYER_COLLISION_RADIUS
     max_z = pz + PLAYER_COLLISION_RADIUS
     return not _aabb_hits_any_block(min_x, max_x, y_min, y_max, min_z, max_z)
+def _has_block_in_direction(dir_vec, distance=PROBE_FRONT_OFFSET, half_y=0.35):
+    # Nur horizontal prüfen
+    d = Vec3(float(dir_vec.x), 0.0, float(dir_vec.z))
+    if d.length_squared() < 1e-8:
+        return False
+    d = d.normalized()
+
+    px = float(player.x) + d.x * distance
+    pz = float(player.z) + d.z * distance
+    r = PLAYER_COLLISION_RADIUS
+
+    # Zwei Höhen prüfen (unten + oben), damit "Face/Probe"-Kanten erkannt werden
+    y_low = float(player.y) + 0.65
+    y_high = float(player.y) + min(float(player.height) - 0.2, 1.55)
+
+    low_hit = _aabb_hits_any_block(px - r, px + r, y_low - half_y, y_low + half_y, pz - r, pz + r)
+    high_hit = _aabb_hits_any_block(px - r, px + r, y_high - half_y, y_high + half_y, pz - r, pz + r)
+    return low_hit or high_hit
+
+
+def get_neighbor_block_hits(distance=PROBE_FRONT_OFFSET):
+    return {
+        "front": _has_block_in_direction(player.forward, distance),
+        "back": _has_block_in_direction(player.back, distance),
+        "left": _has_block_in_direction(player.left, distance),
+        "right": _has_block_in_direction(player.right, distance),
+    }
+def get_front_back_left_right_hits(direction=None, distance=PROBE_FRONT_OFFSET, half_y=0.35):
+    r = PLAYER_COLLISION_RADIUS
+    y_low = float(player.y) + 0.65
+    y_high = float(player.y) + min(float(player.height) - 0.2, 1.55)
+
+    hits = {}
+    for name, dir_vec in (
+        ("front", player.forward),
+        ("back", player.back),
+        ("left", player.left),
+        ("right", player.right),
+    ):
+        d = Vec3(float(dir_vec.x), 0.0, float(dir_vec.z))
+        if d.length_squared() < 1e-8:
+            hits[name] = False
+            continue
+
+        d = d.normalized()
+        px = float(player.x) + d.x * distance
+        pz = float(player.z) + d.z * distance
+
+        low_hit = _aabb_hits_any_block(px - r, px + r, y_low - half_y, y_low + half_y, pz - r, pz + r)
+        high_hit = _aabb_hits_any_block(px - r, px + r, y_high - half_y, y_high + half_y, pz - r, pz + r)
+        hits[name] = low_hit or high_hit
+
+    if direction is None:
+        return hits  # alle 4 zurück
+
+    key = str(direction).strip().lower()
+    return hits.get(key, False)  # ungültige Richtung => False
+
+def _movement_input_dir_xz():
+    yaw = math.radians(float(player.rotation_y))
+    forward_x = math.sin(yaw)
+    forward_z = math.cos(yaw)
+    right_x = forward_z
+    right_z = -forward_x
+
+    mx = 0.0
+    mz = 0.0
+
+    if held_keys["w"]:
+        mx += forward_x
+        mz += forward_z
+    if held_keys["s"]:
+        mx -= forward_x
+        mz -= forward_z
+    if held_keys["d"]:
+        mx += right_x
+        mz += right_z
+    if held_keys["a"]:
+        mx -= right_x
+        mz -= right_z
+
+    l2 = mx * mx + mz * mz
+    if l2 <= 1e-8:
+        return None
+
+    inv_len = 1.0 / math.sqrt(l2)
+    return mx * inv_len, mz * inv_len
+
+
 
 
 def _apply_vector_gravity():
@@ -1482,6 +1574,7 @@ def _frame_position_for_target(face_pos, face_idx):
 
 def update():
     _apply_player_probe_horizontal()
+
     _apply_vector_gravity()
     _snap_player_y_to_grid()
 
@@ -1494,7 +1587,39 @@ def update():
 
 def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
+    global prev_horizontal_x, prev_horizontal_z
+    print("Gay")
+    move_dir = True
+    if get_front_back_left_right_hits("back"): print("back");  move_dir = Vec3(player.forward) if key=="w" else Vec3(player.forward) if key=="s" else Vec3(player.forward) if key=="d" else Vec3(player.forward) if key=="a" else True  # _movement_input_dir_xz()
+    if get_front_back_left_right_hits("front"): print("front"); move_dir = Vec3(player.back) if key=="w" else Vec3(player.back) if key=="s" else Vec3(player.back) if key=="d" else Vec3(player.back) if key=="a" else True  # _movement_input_dir_xz()
+    if get_front_back_left_right_hits("right"):  print("right");  move_dir = Vec3(player.left) if key=="s" else Vec3(player.left) if key=="w" else Vec3(player.left) if key=="a" else Vec3(player.left) if key=="d" else True
+    if get_front_back_left_right_hits("left"): print("left"); move_dir = Vec3(player.right) if key=="w" else Vec3(player.right) if key=="s" else Vec3(player.right) if key=="d" else Vec3(player.right) if key=="a" else True
+    print(move_dir)
 
+    if isinstance(move_dir, Vec3):
+        px = float(player.x)
+        pz = float(player.z)
+        foot_y = float(player.y) - PLAYER_STAND_HEIGHT
+
+        # Nur eingreifen, wenn der Spieler aktuell nicht frei steht.
+        # if _can_stand_at(px, pz, foot_y):
+        #    return False
+
+        print(move_dir)
+        nx = px + move_dir[0] * player.speed * time.dt
+        nz = pz + move_dir[2] * player.speed * time.dt
+        
+        # ny = pz + move_dir[1] * ANTI_STUCK_NUDGE_DISTANCE
+
+        # Nur nudge, wenn das Ziel in Bewegungsrichtung frei ist.
+
+        print("lol")
+        player.x = nx
+        player.z = nz
+        prev_horizontal_x = nx
+        prev_horizontal_z = nz
+        _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
+        return True
     if key == "o":
         mode = 1 - mode
     if key == "m" or key == "m hold":
