@@ -13,6 +13,10 @@ PLAYER_WIDTH = 0.5
 PLAYER_HEIGHT = 1.5
 
 player = FirstPersonController(gravity=0)
+player.cursor.color = color.white
+player.cursor.rotation = (0,0,0)
+player.cursor.texture = "cursor"
+player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
@@ -151,7 +155,7 @@ block_face_counts = {}
 
 mode = 1
 c = Entity(model="cube", color=color.clear)  # FIX: kein collider
-c2 = Entity(model="cube", texture="frame", scale=1.05)
+c2 = Entity(model="cube", texture="2", scale=1.01)
 
 _FACE_NORMALS = {
     0: Vec3(0, -1, 0),
