@@ -13,7 +13,7 @@ PLAYER_WIDTH = 0.5
 PLAYER_HEIGHT = 1.5
 
 player = FirstPersonController(gravity=0)
-player.speed = 20
+player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
 
@@ -37,7 +37,7 @@ amplitude = 1
 
 chunk_size = 16
 chunk_height = 16
-texture = "atlas0"
+texture = "atlas1"
 
 ATLAS_TILES_X = 4
 ATLAS_TILES_Y = 4
@@ -173,9 +173,9 @@ _OPPOSITE_FACE = {
     5: 4,
 }
 
-GRAVITY_ACCEL = 35.0
-MAX_FALL_SPEED = 55.0
-JUMP_SPEED = 11.5
+GRAVITY_ACCEL = 0.08#80.0
+MAX_FALL_SPEED = 0.42#10.0
+JUMP_SPEED = 1.5*3.92#20.0
 
 # NEU: Sprung nur erlauben, wenn über dem Kopf genug Platz ist
 MIN_HEADROOM_TO_JUMP = 1.0
@@ -1262,7 +1262,7 @@ def _apply_vector_gravity():
                 _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
                 continue
 
-        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * dt, -MAX_FALL_SPEED)
+        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL, -MAX_FALL_SPEED/dt)#GRAVITY_ACCEL*dt
         next_y = float(player.y) + vertical_velocity * dt
         next_foot = next_y - PLAYER_STAND_HEIGHT
 
