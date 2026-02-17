@@ -1,5 +1,10 @@
 # Voxel Engine Test
 
+It is starting to feel like a real, early version of Minecraft...
+
+<img width="4320" height="2584" alt="image" src="https://github.com/user-attachments/assets/2d984cdd-8c0e-44e2-9c69-8f18d8b3a910" />
+
+
 Performance fix! Now let's wait for the working mining system.
 wait, did i add ther cursor again? let's look into it later
 
