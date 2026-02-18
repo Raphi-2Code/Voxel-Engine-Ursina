@@ -177,9 +177,9 @@ _OPPOSITE_FACE = {
     5: 4,
 }
 
-GRAVITY_ACCEL = 0.08#80.0
-MAX_FALL_SPEED = 0.42#10.0
-JUMP_SPEED = 1.5*3.92#20.0
+GRAVITY_ACCEL = 0.08*100#80.0
+MAX_FALL_SPEED = 0.42*1000#10.0
+JUMP_SPEED = 2*3.92#20.0
 
 # NEU: Sprung nur erlauben, wenn über dem Kopf genug Platz ist
 MIN_HEADROOM_TO_JUMP = 1.0
@@ -1266,7 +1266,7 @@ def _apply_vector_gravity():
                 _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
                 continue
 
-        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL, -MAX_FALL_SPEED/dt)#GRAVITY_ACCEL*dt
+        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL*time.dt, -MAX_FALL_SPEED/60)#GRAVITY_ACCEL*dt
         next_y = float(player.y) + vertical_velocity * dt
         next_foot = next_y - PLAYER_STAND_HEIGHT
 
