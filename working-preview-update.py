@@ -21,7 +21,7 @@ player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
 
-player.collider = None  # FIX: keine Ursina-Kollision
+player.collider = None
 
 Sky(texture="clouds.png")
 
@@ -1642,7 +1642,7 @@ def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
     global prev_horizontal_x, prev_horizontal_z
 
-    print("Gay")
+    print("test")
     move_dir = True
     if get_front_back_left_right_hits("back"):
         print("back")
