@@ -14,14 +14,14 @@ PLAYER_HEIGHT = 1.5
 
 player = FirstPersonController(gravity=0)
 player.cursor.color = color.white
-player.cursor.rotation = (0,0,0)
+player.cursor.rotation = (0, 0, 0)
 player.cursor.texture = "cursor"
 player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
 
-player.collider = None
+player.collider = None  # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
 
@@ -41,10 +41,10 @@ amplitude = 1
 
 chunk_size = 16
 chunk_height = 16
-texture = "atlas1"
+texture = "atlas2"
 
 ATLAS_TILES_X = 4
-ATLAS_TILES_Y = 4
+ATLAS_TILES_Y = 5  # <--- GEÄNDERT auf 5 für den neuen Atlas
 ATLAS_BLEED = 0.0015
 
 window.fps_counter.disable()
@@ -109,6 +109,14 @@ BLOCK_FACE_TILES = {
         4: (3, 1),
         5: (3, 1),
     },
+    "log": {
+        0: (1, 4),
+        1: (1, 4),
+        2: (0, 4),
+        3: (0, 4),
+        4: (0, 4),
+        5: (0, 4),
+    },
 }
 DEFAULT_BLOCK_TYPE = "grass"
 selected_block_type = DEFAULT_BLOCK_TYPE
@@ -120,6 +128,7 @@ BLOCK_SELECT_KEYS = {
     "7": "leaves",
     "8": "water",
     "9": "dirt",
+    "0": "log",
 }
 
 atlas_texture = load_texture(texture)
@@ -177,9 +186,9 @@ _OPPOSITE_FACE = {
     5: 4,
 }
 
-GRAVITY_ACCEL = 0.08*100#80.0
-MAX_FALL_SPEED = 0.42*1000#10.0
-JUMP_SPEED = 2*3.92#20.0
+GRAVITY_ACCEL = 0.08 * 100  # 80.0
+MAX_FALL_SPEED = 0.42 * 1000  # 10.0
+JUMP_SPEED = 2 * 3.92  # 20.0
 
 # NEU: Sprung nur erlauben, wenn über dem Kopf genug Platz ist
 MIN_HEADROOM_TO_JUMP = 1.0
@@ -1173,7 +1182,8 @@ def get_front_back_left_right_hits(direction=None, distance=PROBE_FRONT_OFFSET, 
     y_high = float(player.y) + min(float(player.height) - 0.2, 1.55)
 
     hits = {}
-    for name, dir_vec in (("front", player.forward), ("back", player.back), ("left", player.left), ("right", player.right)):
+    for name, dir_vec in (("front", player.forward), ("back", player.back), ("left", player.left),
+                          ("right", player.right)):
         d = Vec3(float(dir_vec.x), 0.0, float(dir_vec.z))
         if d.length_squared() < 1e-8:
             hits[name] = False
@@ -1266,7 +1276,7 @@ def _apply_vector_gravity():
                 _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
                 continue
 
-        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL*time.dt, -MAX_FALL_SPEED/60)#GRAVITY_ACCEL*dt
+        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * time.dt, -MAX_FALL_SPEED / 60)  # GRAVITY_ACCEL*dt
         next_y = float(player.y) + vertical_velocity * dt
         next_foot = next_y - PLAYER_STAND_HEIGHT
 
@@ -1372,6 +1382,51 @@ def _add_face(face_key, chunk_coord, affected, block_type=None):
     return True
 
 
+def place_block_programmatically(base_tuple, btype, affected):
+    """Setzt einen Block per Code und löscht unsichtbare Zwischenwände (Culling)."""
+    base_key = _vkey(base_tuple)
+    if base_key in block_types:
+        return
+
+    _set_block_type(base_key, btype)
+    cube_base = Vec3(*base_key)
+
+    for i, off in enumerate(_FACE_OFFSETS):
+        fp = cube_base + off
+        same = _face_key(fp, i)
+        opp = _face_key(fp, _OPPOSITE_FACE[i])
+
+        if opp in world_faces:
+            _remove_face(opp, affected)
+        elif same not in world_faces:
+            tgt = _chunk_coord_from_face(fp, i)
+            _add_face(same, tgt, affected, block_type=btype)
+
+
+def generate_tree(x, y, z, affected):
+    """Generiert einen Baum deterministisch berechnet aus den Koordinaten."""
+    height_val = math.sin(x * 78.233 + z * 12.9898 + seed) * 31337.1337
+    fraction = abs(height_val) - math.floor(abs(height_val))
+    tree_height = 4 + int(fraction * 3)
+
+    for i in range(tree_height):
+        place_block_programmatically((x, y + i * BLOCK_HEIGHT, z), "log", affected)
+
+    top_y = y + (tree_height - 1) * BLOCK_HEIGHT
+    for dx in range(-2, 3):
+        for dy in range(-1, 2):
+            for dz in range(-2, 3):
+                if dx == 0 and dz == 0 and dy <= 0:
+                    continue
+                if abs(dx) + abs(dy) + abs(dz) > 3:
+                    continue
+
+                lx = x + dx * 1.0
+                ly = top_y + dy * BLOCK_HEIGHT
+                lz = z + dz * 1.0
+                place_block_programmatically((lx, ly, lz), "leaves", affected)
+
+
 def load_chunks():
     world_faces.clear()
     face_to_chunk.clear()
@@ -1414,7 +1469,23 @@ def load_chunks():
 
     _apply_surface_layers()
 
-    for chunk_coord in list(chunk_face_sets.keys()):
+    # --- BÄUME MIT FORMEL GENERIEREN ---
+    affected_by_trees = set()
+    grass_blocks = [base for base, btype in block_types.items() if btype == "grass"]
+
+    for base in grass_blocks:
+        x, yb, z = base
+
+        placement_val = math.sin(x * 12.9898 + z * 78.233 + seed) * 43758.5453
+        tree_chance = abs(placement_val) - math.floor(abs(placement_val))
+
+        if tree_chance < 0.02:
+            tree_y = yb + BLOCK_HEIGHT
+            generate_tree(x, tree_y, z, affected_by_trees)
+
+    all_chunks_to_rebuild = set(chunk_face_sets.keys()).union(affected_by_trees)
+
+    for chunk_coord in all_chunks_to_rebuild:
         _rebuild_chunk_mesh(chunk_coord)
 
     print(f"[gravity] faces={len(world_faces)} blocks={len(block_face_counts)} columns={len(top_columns)}")
