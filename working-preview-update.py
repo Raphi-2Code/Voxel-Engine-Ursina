@@ -1,7 +1,6 @@
 from ursina import *
 from panda3d.core import LVecBase3f
 from ursina.prefabs.first_person_controller import *
-from perlin_noise import *
 from itertools import *
 import math
 import numpy as np
@@ -34,10 +33,8 @@ cube_faces = [
     (-0.5, 1.5, 0, 0, 0, -90),
 ]
 
+# Wird für die deterministische Baum-Generierung behalten
 seed = ord("y") + ord("o")
-octaves = 0.5
-frequency = 8
-amplitude = 1
 
 chunk_size = 16
 chunk_height = 16
@@ -241,21 +238,6 @@ prev_horizontal_x = None
 prev_horizontal_z = None
 
 
-class Perlin:
-    def __init__(self):
-        self.seed = seed
-        self.octaves = octaves
-        self.freq = frequency
-        self.amplitude = amplitude
-        self.pNoise = PerlinNoise(seed=self.seed, octaves=self.octaves)
-
-    def get_height(self, x, z):
-        return self.pNoise([x / self.freq, z / self.freq]) * self.amplitude
-
-
-noise = Perlin()
-
-
 def _vkey(v):
     return (round(float(v[0]), 4), round(float(v[1]), 4), round(float(v[2]), 4))
 
@@ -315,40 +297,7 @@ def _face_uvs(face_idx, block_type, quad_verts):
 
     du = max(u1 - u0, 1e-8)
     dv = max(v1 - v0, 1e-8)
-    out = []
 
-    for p in quad_verts:
-        vx = float(p.x)
-        vy = float(p.y)
-        vz = float(p.z)
-
-        if face_idx == 1:
-            lu = vx - x0
-            lv = z1 - vz
-        elif face_idx == 0:
-            lu = vx - x0
-            lv = vz - z0
-        elif face_idx == 2:
-            lu = vx - x0
-            lv = vy - y0
-        elif face_idx == 3:
-            lu = x1 - vx
-            lv = vy - y0
-        elif face_idx == 4:
-            lu = z1 - vz
-            lv = vy - y0
-        else:
-            lu = vz - z0
-            lv = vy - y0
-
-        lu = clamp(lu, 0.0, 1.0)
-        lv = clamp(lv, 0.0, 1.0)
-        out.append(Vec2(u0 + lu * du, v0 + lu * 0 + lv * dv))
-
-    # NOTE: obige Zeile v0 + lu*0 ist äquivalent zu v0; lässt es explizit linear wirken.
-    # Falls du lieber original willst: out.append(Vec2(u0 + lu * du, v0 + lv * dv))
-
-    # Korrektur auf exakt original:
     out = []
     for p in quad_verts:
         vx = float(p.x)
@@ -1713,10 +1662,8 @@ def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
     global prev_horizontal_x, prev_horizontal_z
 
-    print("test")
     move_dir = True
     if get_front_back_left_right_hits("back"):
-        print("back")
         move_dir = (
             Vec3(player.forward)
             if key == "w"
@@ -1729,7 +1676,6 @@ def input(key):
             else True
         )
     if get_front_back_left_right_hits("front"):
-        print("front")
         move_dir = (
             Vec3(player.back)
             if key == "w"
@@ -1742,7 +1688,6 @@ def input(key):
             else True
         )
     if get_front_back_left_right_hits("right"):
-        print("right")
         move_dir = (
             Vec3(player.left)
             if key == "s"
@@ -1755,7 +1700,6 @@ def input(key):
             else True
         )
     if get_front_back_left_right_hits("left"):
-        print("left")
         move_dir = (
             Vec3(player.right)
             if key == "w"
@@ -1767,17 +1711,14 @@ def input(key):
             if key == "a"
             else True
         )
-    print(move_dir)
 
     if isinstance(move_dir, Vec3):
         px = float(player.x)
         pz = float(player.z)
 
-        print(move_dir)
         nx = px + move_dir[0] * player.speed * time.dt
         nz = pz + move_dir[2] * player.speed * time.dt
 
-        print("lol")
         player.x = nx
         player.z = nz
         prev_horizontal_x = nx
