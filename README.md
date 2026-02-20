@@ -1,8 +1,5 @@
 # Voxel Engine Test
 
-![8D74F991-31D8-4913-B22F-D695EDBB8F80_1_206_a](https://github.com/user-attachments/assets/b15f272e-b51f-4828-aa13-541f1bc7b002)
-
-
 It is starting to feel like a real, early version of Minecraft...
 
 <img width="4320" height="2584" alt="image" src="https://github.com/user-attachments/assets/2d984cdd-8c0e-44e2-9c69-8f18d8b3a910" />
