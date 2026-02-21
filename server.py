@@ -36,8 +36,8 @@ def compute_height(noise, x, z):
 
 with open('chunks.txt', 'w') as yo:
     noise = Perlin()
-    for x_chunk in range(4):
-        for z_chunk in range(4):
+    for x_chunk in range(32):
+        for z_chunk in range(32):
             chunk_faces2 = []
             chunk_faces3 = []
             for x in range(xpos + x_chunk * chunk_size, xpos + x_chunk * chunk_size + chunk_size):
