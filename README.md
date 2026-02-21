@@ -1,6 +1,6 @@
 # Voxel Engine Test
 
-![image](https://github.com/Raphi-2Code/Voxel-Engine-Ursina/assets/voxel-world.gif)
+![Voxel World Demo](voxel-world.gif)
 
 It is starting to feel like a real, early version of Minecraft...
 
