@@ -1656,40 +1656,60 @@ def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
     global prev_horizontal_x, prev_horizontal_z
 
-    # --- VERBESSERTES ANTI-STUCK SYSTEM START ---
-    hits = get_front_back_left_right_hits()
+    # --- PERFEKTIONIERTES ANTI-STUCK SYSTEM ---
+    # Wir messen jetzt von ganz unten (Fußsohle) bis ganz oben (Kopf).
+    # Das verhindert, dass man beim Springen mit den Füßen oder dem Kopf
+    # in eine Lücke glitchen kann!
+    y_min = float(player.y) + PLAYER_COLLISION_FOOT_CLEARANCE
+    y_max = float(player.y) + float(player.height) - PLAYER_COLLISION_HEAD_CLEARANCE
 
-    escape_dir = Vec3(0, 0, 0)
-    is_stuck = False
+    px = float(player.x)
+    pz = float(player.z)
+    r = PLAYER_COLLISION_RADIUS
+    dist = PROBE_FRONT_OFFSET
 
-    # Kombiniere die Ausweichvektoren, falls mehrere Wände berührt werden
-    if hits.get("front"):
-        escape_dir += Vec3(player.back)
-        is_stuck = True
-    if hits.get("back"):
-        escape_dir += Vec3(player.forward)
-        is_stuck = True
-    if hits.get("right"):
-        escape_dir += Vec3(player.left)
-        is_stuck = True
-    if hits.get("left"):
-        escape_dir += Vec3(player.right)
-        is_stuck = True
+    # Hilfsfunktion, um eine Richtung auf Kollision der kompletten Höhe zu prüfen
+    def check_dir(d_vec):
+        d = Vec3(float(d_vec.x), 0.0, float(d_vec.z))
+        if d.length_squared() < 1e-8: return False
+        d = d.normalized()
+        cx = px + d.x * dist
+        cz = pz + d.z * dist
+        return _aabb_hits_any_block(cx - r, cx + r, y_min, y_max, cz - r, cz + r)
 
-    # Wenn der Spieler steckt und versucht, sich zu bewegen (w, a, s, d)
+    # Die flachen Bewegungsrichtungen berechnen
+    fwd = Vec3(player.forward);
+    fwd.y = 0
+    bck = Vec3(player.back);
+    bck.y = 0
+    rgt = Vec3(player.right);
+    rgt.y = 0
+    lft = Vec3(player.left);
+    lft.y = 0
+
+    hit_front = check_dir(fwd)
+    hit_back = check_dir(bck)
+    hit_right = check_dir(rgt)
+    hit_left = check_dir(lft)
+
+    is_stuck = hit_front or hit_back or hit_right or hit_left
+
+    # Wie in deinem Original-Code: Wir reagieren auf jede WASD-Taste, wenn man an einer Wand klebt
     if is_stuck and key in ("w", "a", "s", "d"):
-        escape_dir.y = 0  # Nur auf der XZ-Ebene ausweichen
+        move_dir = Vec3(0, 0, 0)
 
-        # Sicherstellen, dass der Vektor nicht 0 ist (z.B. vorne und hinten blockiert)
-        if escape_dir.length_squared() > 1e-6:
-            escape_dir = escape_dir.normalized()
+        # Alle Fluchtrichtungen kombinieren, wenn man in einer Ecke steht
+        if hit_front: move_dir += bck
+        if hit_back:  move_dir += fwd
+        if hit_right: move_dir += lft
+        if hit_left:  move_dir += rgt
 
-            px = float(player.x)
-            pz = float(player.z)
+        if move_dir.length_squared() > 1e-8:
+            move_dir = move_dir.normalized()
 
-            # Spieler entlang des resultierenden Vektors bewegen
-            nx = px + escape_dir.x * player.speed * time.dt
-            nz = pz + escape_dir.z * player.speed * time.dt
+            # Spieler sanft von den blockierten Wänden wegschieben
+            nx = px + move_dir.x * player.speed * time.dt
+            nz = pz + move_dir.z * player.speed * time.dt
 
             player.x = nx
             player.z = nz
@@ -1698,7 +1718,7 @@ def input(key):
 
             _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
             return True
-    # --- VERBESSERTES ANTI-STUCK SYSTEM ENDE ---
+    # --- ENDE ANTI-STUCK SYSTEM ---
 
     if key == "o":
         mode = 1 - mode
