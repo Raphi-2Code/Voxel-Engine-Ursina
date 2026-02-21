@@ -1656,48 +1656,58 @@ def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
     global prev_horizontal_x, prev_horizontal_z
 
-    move_dir = True
-    if get_front_back_left_right_hits("back"):
-        move_dir = (
-            Vec3(player.forward) if key == "w" else Vec3(player.forward) if key == "s"
-            else Vec3(player.forward) if key == "d" else Vec3(player.forward) if key == "a" else True
-        )
-    if get_front_back_left_right_hits("front"):
-        move_dir = (
-            Vec3(player.back) if key == "w" else Vec3(player.back) if key == "s"
-            else Vec3(player.back) if key == "d" else Vec3(player.back) if key == "a" else True
-        )
-    if get_front_back_left_right_hits("right"):
-        move_dir = (
-            Vec3(player.left) if key == "s" else Vec3(player.left) if key == "w"
-            else Vec3(player.left) if key == "a" else Vec3(player.left) if key == "d" else True
-        )
-    if get_front_back_left_right_hits("left"):
-        move_dir = (
-            Vec3(player.right) if key == "w" else Vec3(player.right) if key == "s"
-            else Vec3(player.right) if key == "d" else Vec3(player.right) if key == "a" else True
-        )
+    # --- VERBESSERTES ANTI-STUCK SYSTEM START ---
+    hits = get_front_back_left_right_hits()
 
-    if isinstance(move_dir, Vec3):
-        px = float(player.x)
-        pz = float(player.z)
+    escape_dir = Vec3(0, 0, 0)
+    is_stuck = False
 
-        nx = px + move_dir[0] * player.speed * time.dt
-        nz = pz + move_dir[2] * player.speed * time.dt
+    # Kombiniere die Ausweichvektoren, falls mehrere Wände berührt werden
+    if hits.get("front"):
+        escape_dir += Vec3(player.back)
+        is_stuck = True
+    if hits.get("back"):
+        escape_dir += Vec3(player.forward)
+        is_stuck = True
+    if hits.get("right"):
+        escape_dir += Vec3(player.left)
+        is_stuck = True
+    if hits.get("left"):
+        escape_dir += Vec3(player.right)
+        is_stuck = True
 
-        player.x = nx
-        player.z = nz
-        prev_horizontal_x = nx
-        prev_horizontal_z = nz
-        _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
-        return True
+    # Wenn der Spieler steckt und versucht, sich zu bewegen (w, a, s, d)
+    if is_stuck and key in ("w", "a", "s", "d"):
+        escape_dir.y = 0  # Nur auf der XZ-Ebene ausweichen
+
+        # Sicherstellen, dass der Vektor nicht 0 ist (z.B. vorne und hinten blockiert)
+        if escape_dir.length_squared() > 1e-6:
+            escape_dir = escape_dir.normalized()
+
+            px = float(player.x)
+            pz = float(player.z)
+
+            # Spieler entlang des resultierenden Vektors bewegen
+            nx = px + escape_dir.x * player.speed * time.dt
+            nz = pz + escape_dir.z * player.speed * time.dt
+
+            player.x = nx
+            player.z = nz
+            prev_horizontal_x = nx
+            prev_horizontal_z = nz
+
+            _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
+            return True
+    # --- VERBESSERTES ANTI-STUCK SYSTEM ENDE ---
 
     if key == "o":
         mode = 1 - mode
+
     if key == "m" or key == "m hold":
         player.y += 1
         vertical_velocity = 0.0
         _snap_player_y_to_grid(force=True)
+
     if key == "l":
         player.y -= 1
         vertical_velocity = 0.0
@@ -1713,6 +1723,7 @@ def input(key):
     if key == "e":
         player.enabled = not player.enabled
         print(len(scene.entities))
+
     if key in BLOCK_SELECT_KEYS:
         selected_block_type = BLOCK_SELECT_KEYS[key]
         print(f"[build] selected block: {selected_block_type}")
@@ -1732,6 +1743,7 @@ def input(key):
     if key == "r":
         player.y = 10
         _snap_player_y_to_grid(force=True)
+
     if key == "n":
         player.rotation_x = -90
         player.rotation_y = 90
@@ -1739,6 +1751,7 @@ def input(key):
         window.exit_button.disable()
         window.cog_menu.disable()
         c2.disable()
+
     if key == "z":
         player.cursor.disable()
 
