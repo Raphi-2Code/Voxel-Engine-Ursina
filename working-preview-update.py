@@ -1,5 +1,5 @@
 from ursina import *
-from panda3d.core import LVecBase3f
+from panda3d.core import LVecBase3f, Vec4
 from ursina.prefabs.first_person_controller import *
 from itertools import *
 import math
@@ -33,7 +33,6 @@ cube_faces = [
     (-0.5, 1.5, 0, 0, 0, -90),
 ]
 
-# Wird für die deterministische Baum-Generierung behalten
 seed = ord("y") + ord("o")
 
 chunk_size = 16
@@ -41,7 +40,7 @@ chunk_height = 16
 texture = "atlas2"
 
 ATLAS_TILES_X = 4
-ATLAS_TILES_Y = 5  # <--- GEÄNDERT auf 5 für den neuen Atlas
+ATLAS_TILES_Y = 5
 ATLAS_BLEED = 0.0015
 
 window.fps_counter.disable()
@@ -50,82 +49,20 @@ window.cog_menu.disable()
 ATLAS_FLIP_Y = True
 DEFAULT_ATLAS_TILE = (0, 0)
 BLOCK_FACE_TILES = {
-    "grass": {
-        0: (2, 0),
-        1: (0, 0),
-        2: (1, 0),
-        3: (1, 0),
-        4: (1, 0),
-        5: (1, 0),
-    },
-    "dirt": {
-        0: (2, 0),
-        1: (2, 0),
-        2: (2, 0),
-        3: (2, 0),
-        4: (2, 0),
-        5: (2, 0),
-    },
-    "stone": {
-        0: (3, 0),
-        1: (3, 0),
-        2: (3, 0),
-        3: (3, 0),
-        4: (3, 0),
-        5: (3, 0),
-    },
-    "sand": {
-        0: (0, 1),
-        1: (0, 1),
-        2: (0, 1),
-        3: (0, 1),
-        4: (0, 1),
-        5: (0, 1),
-    },
-    "planks": {
-        0: (1, 1),
-        1: (1, 1),
-        2: (1, 1),
-        3: (1, 1),
-        4: (1, 1),
-        5: (1, 1),
-    },
-    "leaves": {
-        0: (2, 1),
-        1: (2, 1),
-        2: (2, 1),
-        3: (2, 1),
-        4: (2, 1),
-        5: (2, 1),
-    },
-    "water": {
-        0: (3, 1),
-        1: (3, 1),
-        2: (3, 1),
-        3: (3, 1),
-        4: (3, 1),
-        5: (3, 1),
-    },
-    "log": {
-        0: (1, 4),
-        1: (1, 4),
-        2: (0, 4),
-        3: (0, 4),
-        4: (0, 4),
-        5: (0, 4),
-    },
+    "grass": {0: (2, 0), 1: (0, 0), 2: (1, 0), 3: (1, 0), 4: (1, 0), 5: (1, 0)},
+    "dirt": {0: (2, 0), 1: (2, 0), 2: (2, 0), 3: (2, 0), 4: (2, 0), 5: (2, 0)},
+    "stone": {0: (3, 0), 1: (3, 0), 2: (3, 0), 3: (3, 0), 4: (3, 0), 5: (3, 0)},
+    "sand": {0: (0, 1), 1: (0, 1), 2: (0, 1), 3: (0, 1), 4: (0, 1), 5: (0, 1)},
+    "planks": {0: (1, 1), 1: (1, 1), 2: (1, 1), 3: (1, 1), 4: (1, 1), 5: (1, 1)},
+    "leaves": {0: (2, 1), 1: (2, 1), 2: (2, 1), 3: (2, 1), 4: (2, 1), 5: (2, 1)},
+    "water": {0: (3, 1), 1: (3, 1), 2: (3, 1), 3: (3, 1), 4: (3, 1), 5: (3, 1)},
+    "log": {0: (1, 4), 1: (1, 4), 2: (0, 4), 3: (0, 4), 4: (0, 4), 5: (0, 4)},
 }
 DEFAULT_BLOCK_TYPE = "grass"
 selected_block_type = DEFAULT_BLOCK_TYPE
 BLOCK_SELECT_KEYS = {
-    "1": "grass",
-    "2": "stone",
-    "3": "sand",
-    "6": "planks",
-    "7": "leaves",
-    "8": "water",
-    "9": "dirt",
-    "0": "log",
+    "1": "grass", "2": "stone", "3": "sand", "6": "planks",
+    "7": "leaves", "8": "water", "9": "dirt", "0": "log",
 }
 
 atlas_texture = load_texture(texture)
@@ -135,8 +72,44 @@ if atlas_texture is not None:
     except:
         pass
 
-GRID_X = 4
-GRID_Z = 4
+# ------------------------------------------------------------
+# FIX (Greedy Meshing): Wiederholung innerhalb einer Atlas-Tile
+# statt "eine Tile über das ganze Greedy-Quad zu stretchen".
+#
+# Wir speichern pro Vertex:
+#   - UV0 = lokale UV in Block-Einheiten (0..w / 0..h)
+#   - Color = (u0, v0, u1, v1) Tile-Rect im Atlas
+# Shader macht dann: uv = mix(rect.xy, rect.zw, fract(local_uv))
+# ------------------------------------------------------------
+atlas_repeat_shader = Shader(
+    language=Shader.GLSL,
+    vertex=
+        "#version 120\n"
+        "uniform mat4 p3d_ModelViewProjectionMatrix;\n"
+        "attribute vec4 p3d_Vertex;\n"
+        "attribute vec2 p3d_MultiTexCoord0;\n"
+        "attribute vec4 p3d_Color;\n"
+        "varying vec2 v_local_uv;\n"
+        "varying vec4 v_tile_rect;\n"
+        "void main(){\n"
+        "    gl_Position = p3d_ModelViewProjectionMatrix * p3d_Vertex;\n"
+        "    v_local_uv = p3d_MultiTexCoord0;\n"
+        "    v_tile_rect = p3d_Color;\n"
+        "}\n",
+    fragment=
+        "#version 120\n"
+        "uniform sampler2D p3d_Texture0;\n"
+        "varying vec2 v_local_uv;\n"
+        "varying vec4 v_tile_rect;\n"
+        "void main(){\n"
+        "    vec2 f = fract(v_local_uv);\n"
+        "    vec2 uv = mix(v_tile_rect.xy, v_tile_rect.zw, f);\n"
+        "    gl_FragColor = texture2D(p3d_Texture0, uv);\n"
+        "}\n",
+)
+
+GRID_X = 32
+GRID_Z = 32
 base_chunk_coords = [(cx, 0, cz) for cx in range(GRID_X) for cz in range(GRID_Z)]
 
 all_chunks = {}
@@ -151,8 +124,6 @@ world_faces = set()
 face_to_chunk = {}
 face_block_types = {}
 
-# WICHTIG: block_types bleibt jetzt persistent, auch wenn ein Block komplett gecullt ist
-# (also 0 Faces hat). Gelöscht wird er nur beim tatsächlichen Abbauen.
 block_types = {}
 
 top_columns = {}
@@ -160,34 +131,22 @@ top_cells = {}
 block_face_counts = {}
 
 mode = 1
-c = Entity(model="cube", color=color.clear)  # FIX: kein collider
+c = Entity(model="cube", color=color.clear)
 c2 = Entity(model="cube", texture="2", scale=1.01)
 
 _FACE_NORMALS = {
-    0: Vec3(0, -1, 0),
-    1: Vec3(0, 1, 0),
-    2: Vec3(0, 0, 1),
-    3: Vec3(0, 0, -1),
-    4: Vec3(1, 0, 0),
-    5: Vec3(-1, 0, 0),
+    0: Vec3(0, -1, 0), 1: Vec3(0, 1, 0), 2: Vec3(0, 0, 1),
+    3: Vec3(0, 0, -1), 4: Vec3(1, 0, 0), 5: Vec3(-1, 0, 0),
 }
 
 _FACE_OFFSETS = [Vec3(*cf[:3]) for cf in cube_faces]
 
-_OPPOSITE_FACE = {
-    0: 1,
-    1: 0,
-    2: 3,
-    3: 2,
-    4: 5,
-    5: 4,
-}
+_OPPOSITE_FACE = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4}
 
-GRAVITY_ACCEL = 0.08 * 100  # 80.0
-MAX_FALL_SPEED = 0.42 * 1000  # 10.0
-JUMP_SPEED = 2 * 3.92  # 20.0
+GRAVITY_ACCEL = 0.08 * 100
+MAX_FALL_SPEED = 0.42 * 1000
+JUMP_SPEED = 2 * 3.92
 
-# NEU: Sprung nur erlauben, wenn über dem Kopf genug Platz ist
 MIN_HEADROOM_TO_JUMP = 1.0
 
 PLAYER_STAND_HEIGHT = 0.0
@@ -196,7 +155,6 @@ MAX_STEP_UP = 0.35
 PLAYER_COLLISION_RADIUS = PLAYER_WIDTH * 0.5
 PLAYER_FOOT_RADIUS = PLAYER_COLLISION_RADIUS
 
-# FIX (Claude): Clearance-Werte reduzieren
 PLAYER_COLLISION_FOOT_CLEARANCE = 0.005
 PLAYER_COLLISION_HEAD_CLEARANCE = 0.005
 
@@ -214,17 +172,11 @@ PROBE_THICK = 0.06
 PROBE_FRONT_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 PROBE_SIDE_OFFSET = PLAYER_COLLISION_RADIUS + 0.25
 
-PROBE_COLOR = color.clear  # white33
-PROBE_HIT_COLOR = color.clear  # white33
+PROBE_COLOR = color.clear
+PROBE_HIT_COLOR = color.clear
 EDGE_PROBE_NAMES = {
-    "front_low",
-    "front_high",
-    "right_low",
-    "right_high",
-    "left_low",
-    "left_high",
-    "back_low",
-    "back_high",
+    "front_low", "front_high", "right_low", "right_high",
+    "left_low", "left_high", "back_low", "back_high",
 }
 PLAYER_Y_SNAP_STEP = PROBE_GRID_STEP
 PLAYER_Y_SNAP_ONLY_GROUNDED = True
@@ -284,10 +236,9 @@ def _atlas_rect(tile_x, tile_y):
     return u0, v0, u1, v1
 
 
+# FIX: liefert jetzt "local UV" in Block-Einheiten (0..w / 0..h),
+# nicht mehr 0..1 über das komplette Greedy-Quad.
 def _face_uvs(face_idx, block_type, quad_verts):
-    tile = _block_tile_for_face(block_type, int(face_idx))
-    u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
-
     xs = [float(v.x) for v in quad_verts]
     ys = [float(v.y) for v in quad_verts]
     zs = [float(v.z) for v in quad_verts]
@@ -295,95 +246,34 @@ def _face_uvs(face_idx, block_type, quad_verts):
     y0, y1 = min(ys), max(ys)
     z0, z1 = min(zs), max(zs)
 
-    du = max(u1 - u0, 1e-8)
-    dv = max(v1 - v0, 1e-8)
-
     out = []
     for p in quad_verts:
         vx = float(p.x)
         vy = float(p.y)
         vz = float(p.z)
 
-        if face_idx == 1:
-            lu = vx - x0
-            lv = z1 - vz
-        elif face_idx == 0:
-            lu = vx - x0
-            lv = vz - z0
-        elif face_idx == 2:
-            lu = vx - x0
-            lv = vy - y0
-        elif face_idx == 3:
-            lu = x1 - vx
-            lv = vy - y0
-        elif face_idx == 4:
-            lu = z1 - vz
-            lv = vy - y0
-        else:
-            lu = vz - z0
-            lv = vy - y0
+        if face_idx == 1:      # top
+            lu = (vx - x0)
+            lv = (z1 - vz)
+        elif face_idx == 0:    # bottom
+            lu = (vx - x0)
+            lv = (vz - z0)
+        elif face_idx == 2:    # +z
+            lu = (vx - x0)
+            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
+        elif face_idx == 3:    # -z
+            lu = (x1 - vx)
+            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
+        elif face_idx == 4:    # +x
+            lu = (z1 - vz)
+            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
+        else:                  # -x
+            lu = (vz - z0)
+            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
 
-        lu = clamp(lu, 0.0, 1.0)
-        lv = clamp(lv, 0.0, 1.0)
-        out.append(Vec2(u0 + lu * du, v0 + lv * dv))
+        out.append(Vec2(lu, lv))
 
     return out
-
-
-def _face_vertices(pos_key, face_idx):
-    base = _cube_base_from_face(pos_key, face_idx)
-    x = float(base[0])
-    y = float(base[1])
-    z = float(base[2])
-
-    x0 = x - BLOCK_HALF_EXTENT
-    x1 = x + BLOCK_HALF_EXTENT
-    y0 = y + float(_FACE_OFFSETS[0].y)
-    y1 = y + float(_FACE_OFFSETS[1].y)
-    z0 = z - BLOCK_HALF_EXTENT
-    z1 = z + BLOCK_HALF_EXTENT
-
-    if face_idx == 0:
-        return [
-            Vec3(x0, y0, z0),
-            Vec3(x1, y0, z0),
-            Vec3(x1, y0, z1),
-            Vec3(x0, y0, z1),
-        ]
-    if face_idx == 1:
-        return [
-            Vec3(x0, y1, z0),
-            Vec3(x0, y1, z1),
-            Vec3(x1, y1, z1),
-            Vec3(x1, y1, z0),
-        ]
-    if face_idx == 2:
-        return [
-            Vec3(x0, y0, z1),
-            Vec3(x1, y0, z1),
-            Vec3(x1, y1, z1),
-            Vec3(x0, y1, z1),
-        ]
-    if face_idx == 3:
-        return [
-            Vec3(x0, y0, z0),
-            Vec3(x0, y1, z0),
-            Vec3(x1, y1, z0),
-            Vec3(x1, y0, z0),
-        ]
-    if face_idx == 4:
-        return [
-            Vec3(x1, y0, z0),
-            Vec3(x1, y1, z0),
-            Vec3(x1, y1, z1),
-            Vec3(x1, y0, z1),
-        ]
-    return [
-        Vec3(x0, y0, z0),
-        Vec3(x0, y0, z1),
-        Vec3(x0, y1, z1),
-        Vec3(x0, y1, z0),
-    ]
 
 
 def _chunk_coord_from_pos(pos):
@@ -501,43 +391,149 @@ def _rebuild_chunk_mesh(chunk_coord):
     triangles = []
     uvs = []
     normals = []
+    colors = []  # FIX: wir speichern (u0,v0,u1,v1) pro Vertex
 
+    faces_by_dir = {i: [] for i in range(6)}
     for pos_key, fidx in chunk_face_sets[chunk_coord]:
-        face_key = (pos_key, int(fidx))
-        btype = _block_type_from_face_key(face_key)
-        quad_verts = _face_vertices(pos_key, int(fidx))
-        quad_uvs = _face_uvs(int(fidx), btype, quad_verts)
-        n = _FACE_NORMALS.get(int(fidx), Vec3(0, 1, 0))
-        idx0 = len(vertices)
+        faces_by_dir[int(fidx)].append((pos_key, int(fidx)))
 
-        vertices.extend(quad_verts)
-        uvs.extend(quad_uvs)
-        normals.extend([n, n, n, n])
-        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+    for d in range(6):
+        if not faces_by_dir[d]:
+            continue
+
+        slices = {}
+        for fk in faces_by_dir[d]:
+            pos_key, fidx = fk
+            base = _cube_base_from_face(pos_key, fidx)
+            btype = _block_type_from_face_key(fk)
+
+            lx = int(round(base[0]))
+            ly = int(round(base[1] / BLOCK_HEIGHT))
+            lz = int(round(base[2]))
+
+            if d in (0, 1):
+                slice_idx, u, v = ly, lx, lz
+            elif d in (2, 3):
+                slice_idx, u, v = lz, lx, ly
+            elif d in (4, 5):
+                slice_idx, u, v = lx, lz, ly
+
+            if slice_idx not in slices:
+                slices[slice_idx] = {}
+            slices[slice_idx][(u, v)] = btype
+
+        for slice_idx, grid in slices.items():
+            if not grid:
+                continue
+
+            visited = set()
+            min_u = min(k[0] for k in grid.keys())
+            max_u = max(k[0] for k in grid.keys())
+            min_v = min(k[1] for k in grid.keys())
+            max_v = max(k[1] for k in grid.keys())
+
+            for v in range(min_v, max_v + 1):
+                for u in range(min_u, max_u + 1):
+                    if (u, v) in visited or (u, v) not in grid:
+                        continue
+
+                    btype = grid[(u, v)]
+
+                    w = 1
+                    while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == btype:
+                        w += 1
+
+                    h = 1
+                    can_expand = True
+                    while (v + h) <= max_v and can_expand:
+                        for du in range(w):
+                            if (u + du, v + h) in visited or grid.get((u + du, v + h)) != btype:
+                                can_expand = False
+                                break
+                        if can_expand:
+                            h += 1
+
+                    for du in range(w):
+                        for dv in range(h):
+                            visited.add((u + du, v + dv))
+
+                    if d in (0, 1):
+                        bx = float(u)
+                        by = float(slice_idx) * BLOCK_HEIGHT
+                        bz = float(v)
+                        W_ext, H_ext, D_ext = w, BLOCK_HEIGHT, h
+                    elif d in (2, 3):
+                        bx = float(u)
+                        by = float(v) * BLOCK_HEIGHT
+                        bz = float(slice_idx)
+                        W_ext, H_ext, D_ext = w, h * BLOCK_HEIGHT, 1.0
+                    else:
+                        bx = float(slice_idx)
+                        by = float(v) * BLOCK_HEIGHT
+                        bz = float(u)
+                        W_ext, H_ext, D_ext = 1.0, h * BLOCK_HEIGHT, w
+
+                    X0 = bx - 0.5
+                    X1 = bx - 0.5 + W_ext
+                    Y0 = by + float(_FACE_OFFSETS[0].y)
+                    Y1 = by + float(_FACE_OFFSETS[0].y) + H_ext
+                    Z0 = bz - 0.5
+                    Z1 = bz - 0.5 + D_ext
+
+                    if d == 0:
+                        quad_verts = [Vec3(X0, Y0, Z0), Vec3(X1, Y0, Z0), Vec3(X1, Y0, Z1), Vec3(X0, Y0, Z1)]
+                    elif d == 1:
+                        quad_verts = [Vec3(X0, Y1, Z0), Vec3(X0, Y1, Z1), Vec3(X1, Y1, Z1), Vec3(X1, Y1, Z0)]
+                    elif d == 2:
+                        quad_verts = [Vec3(X0, Y0, Z1), Vec3(X1, Y0, Z1), Vec3(X1, Y1, Z1), Vec3(X0, Y1, Z1)]
+                    elif d == 3:
+                        quad_verts = [Vec3(X0, Y0, Z0), Vec3(X0, Y1, Z0), Vec3(X1, Y1, Z0), Vec3(X1, Y0, Z0)]
+                    elif d == 4:
+                        quad_verts = [Vec3(X1, Y0, Z0), Vec3(X1, Y1, Z0), Vec3(X1, Y1, Z1), Vec3(X1, Y0, Z1)]
+                    else:
+                        quad_verts = [Vec3(X0, Y0, Z0), Vec3(X0, Y0, Z1), Vec3(X0, Y1, Z1), Vec3(X0, Y1, Z0)]
+
+                    # FIX: Tile-Rect als Vertex-Color
+                    tile = _block_tile_for_face(btype, int(d))
+                    u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
+                    rect = Vec4(u0, v0, u1, v1)
+
+                    # UVs sind jetzt lokale UVs (0..w/h), Shader macht repeat in Tile
+                    quad_uvs = _face_uvs(d, btype, quad_verts)
+                    n = _FACE_NORMALS.get(d, Vec3(0, 1, 0))
+
+                    idx0 = len(vertices)
+                    vertices.extend(quad_verts)
+                    uvs.extend(quad_uvs)
+                    colors.extend([rect, rect, rect, rect])
+                    normals.extend([n, n, n, n])
+                    triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
 
     mesh = Mesh(
         vertices=vertices,
         triangles=triangles,
         uvs=uvs,
         normals=normals,
+        colors=colors,   # FIX
         mode="triangle",
         static=True,
     )
     tex = atlas_texture if atlas_texture is not None else texture
 
     if old is None:
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)  # FIX: kein collider
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
         return
 
     try:
         old.model = mesh
         old.texture = tex
-        old.collider = None  # FIX: kein collider
+        old.shader = atlas_repeat_shader
+        old.collider = None
         old.enabled = True
         combined_terrains[chunk_coord] = old
     except:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex)  # FIX: kein collider
+        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
 
 
 def _refresh_chunks(affected_chunks):
@@ -772,6 +768,7 @@ def _aabb_hits_any_block(min_x, max_x, min_y, max_y, min_z, max_z):
     return hit
 
 
+# ADDED BACK THE MISSING FUNCTION
 def _chunk_has_collider(chunk_coord):
     ent = combined_terrains.get(chunk_coord)
     if ent is None:
@@ -781,7 +778,6 @@ def _chunk_has_collider(chunk_coord):
     return getattr(ent, "collider", None) is not None
 
 
-# NEU: Jump blockieren, wenn direkt über dem Kopf ein Block ist
 def _jump_blocked_by_ceiling():
     _, head_y = _player_body_y_span()
     px = float(player.x)
@@ -939,10 +935,10 @@ def _ensure_player_probes():
         e = Entity(
             model="cube",
             color=PROBE_COLOR,
-            collider="box",  # FIX: Collider vorhanden
+            collider="box",
             scale=half * 2,
         )
-        e.collision = False  # FIX: nur aktiv, wenn Hit auf Chunk-Face/Block
+        e.collision = False
         player_probe_entities[name] = e
         player_probe_hits[name] = False
 
@@ -1038,7 +1034,7 @@ def _apply_player_probe_horizontal():
 
     y_min, y_max = _player_body_y_span()
 
-    dx = cur_x - prev_horizontal_x  # FIX: größere Achse zuerst
+    dx = cur_x - prev_horizontal_x
     dz = cur_z - prev_horizontal_z
     if abs(dx) >= abs(dz):
         res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
@@ -1086,9 +1082,7 @@ def _block_intersects_player(base):
     return (dx * dx + dz * dz) <= (PLAYER_COLLISION_RADIUS * PLAYER_COLLISION_RADIUS)
 
 
-# FIX (Claude): Neue Funktion _can_stand_at hinzufügen
 def _can_stand_at(px, pz, foot_y):
-    """Prüft ob der Spieler an dieser Position frei von Blöcken ist."""
     y_min = foot_y + PLAYER_COLLISION_FOOT_CLEARANCE
     y_max = foot_y + PLAYER_HEIGHT - PLAYER_COLLISION_HEAD_CLEARANCE
     min_x = px - PLAYER_COLLISION_RADIUS
@@ -1225,7 +1219,7 @@ def _apply_vector_gravity():
                 _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
                 continue
 
-        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * time.dt, -MAX_FALL_SPEED / 60)  # GRAVITY_ACCEL*dt
+        vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * time.dt, -MAX_FALL_SPEED / 60)
         next_y = float(player.y) + vertical_velocity * dt
         next_foot = next_y - PLAYER_STAND_HEIGHT
 
@@ -1332,7 +1326,6 @@ def _add_face(face_key, chunk_coord, affected, block_type=None):
 
 
 def place_block_programmatically(base_tuple, btype, affected):
-    """Setzt einen Block per Code und löscht unsichtbare Zwischenwände (Culling)."""
     base_key = _vkey(base_tuple)
     if base_key in block_types:
         return
@@ -1353,7 +1346,6 @@ def place_block_programmatically(base_tuple, btype, affected):
 
 
 def generate_tree(x, y, z, affected):
-    """Generiert einen Baum deterministisch berechnet aus den Koordinaten."""
     height_val = math.sin(x * 78.233 + z * 12.9898 + seed) * 31337.1337
     fraction = abs(height_val) - math.floor(abs(height_val))
     tree_height = 4 + int(fraction * 3)
@@ -1386,39 +1378,41 @@ def load_chunks():
     block_face_counts.clear()
     _reset_chunk_storage()
 
-    chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
+    try:
+        chunks_opened_ = list(eval(open("chunks.txt", "r").read()))
 
-    for legacy_idx, chunk_data in enumerate(chunks_opened_):
-        _ensure_chunk(_legacy_chunk_coord_from_index(legacy_idx))
-        positions = chunk_data[0]
-        indices = chunk_data[1]
-        block_type_data = chunk_data[2] if len(chunk_data) > 2 else None
+        for legacy_idx, chunk_data in enumerate(chunks_opened_):
+            _ensure_chunk(_legacy_chunk_coord_from_index(legacy_idx))
+            positions = chunk_data[0]
+            indices = chunk_data[1]
+            block_type_data = chunk_data[2] if len(chunk_data) > 2 else None
 
-        for i, face_pos in enumerate(positions):
-            if i >= len(indices):
-                break
-            fidx = int(indices[i])
-            btype = DEFAULT_BLOCK_TYPE
-            if block_type_data is not None and i < len(block_type_data):
-                btype = _normalize_block_type(block_type_data[i])
+            for i, face_pos in enumerate(positions):
+                if i >= len(indices):
+                    break
+                fidx = int(indices[i])
+                btype = DEFAULT_BLOCK_TYPE
+                if block_type_data is not None and i < len(block_type_data):
+                    btype = _normalize_block_type(block_type_data[i])
 
-            key = _face_key(face_pos, fidx)
-            if key in world_faces:
-                continue
+                key = _face_key(face_pos, fidx)
+                if key in world_faces:
+                    continue
 
-            chunk_coord = _ensure_chunk(_chunk_coord_from_face(key[0], key[1]))
-            world_faces.add(key)
-            face_to_chunk[key] = chunk_coord
-            face_block_types[key] = btype
-            base = _cube_base_from_face(key[0], key[1])
-            if base not in block_types:
-                block_types[base] = btype
-            chunk_face_sets[chunk_coord].add(key)
-            _register_top_face(key[0], key[1])
+                chunk_coord = _ensure_chunk(_chunk_coord_from_face(key[0], key[1]))
+                world_faces.add(key)
+                face_to_chunk[key] = chunk_coord
+                face_block_types[key] = btype
+                base = _cube_base_from_face(key[0], key[1])
+                if base not in block_types:
+                    block_types[base] = btype
+                chunk_face_sets[chunk_coord].add(key)
+                _register_top_face(key[0], key[1])
+    except Exception as e:
+        print(f"Error loading chunks.txt: {e}")
 
     _apply_surface_layers()
 
-    # --- BÄUME MIT FORMEL GENERIEREN ---
     affected_by_trees = set()
     grass_blocks = [base for base, btype in block_types.items() if btype == "grass"]
 
@@ -1665,51 +1659,23 @@ def input(key):
     move_dir = True
     if get_front_back_left_right_hits("back"):
         move_dir = (
-            Vec3(player.forward)
-            if key == "w"
-            else Vec3(player.forward)
-            if key == "s"
-            else Vec3(player.forward)
-            if key == "d"
-            else Vec3(player.forward)
-            if key == "a"
-            else True
+            Vec3(player.forward) if key == "w" else Vec3(player.forward) if key == "s"
+            else Vec3(player.forward) if key == "d" else Vec3(player.forward) if key == "a" else True
         )
     if get_front_back_left_right_hits("front"):
         move_dir = (
-            Vec3(player.back)
-            if key == "w"
-            else Vec3(player.back)
-            if key == "s"
-            else Vec3(player.back)
-            if key == "d"
-            else Vec3(player.back)
-            if key == "a"
-            else True
+            Vec3(player.back) if key == "w" else Vec3(player.back) if key == "s"
+            else Vec3(player.back) if key == "d" else Vec3(player.back) if key == "a" else True
         )
     if get_front_back_left_right_hits("right"):
         move_dir = (
-            Vec3(player.left)
-            if key == "s"
-            else Vec3(player.left)
-            if key == "w"
-            else Vec3(player.left)
-            if key == "a"
-            else Vec3(player.left)
-            if key == "d"
-            else True
+            Vec3(player.left) if key == "s" else Vec3(player.left) if key == "w"
+            else Vec3(player.left) if key == "a" else Vec3(player.left) if key == "d" else True
         )
     if get_front_back_left_right_hits("left"):
         move_dir = (
-            Vec3(player.right)
-            if key == "w"
-            else Vec3(player.right)
-            if key == "s"
-            else Vec3(player.right)
-            if key == "d"
-            else Vec3(player.right)
-            if key == "a"
-            else True
+            Vec3(player.right) if key == "w" else Vec3(player.right) if key == "s"
+            else Vec3(player.right) if key == "d" else Vec3(player.right) if key == "a" else True
         )
 
     if isinstance(move_dir, Vec3):
