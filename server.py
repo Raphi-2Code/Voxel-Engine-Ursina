@@ -1,22 +1,26 @@
 from ursina import *
 from perlin_noise import *
+from numba import njit
+import numpy as np
 import math
 
 xpos = 0
 zpos = 0
 chunk_size = 16
 cube_faces = [
-    (0,1,0,180,0,0),
-    (0,2,0,0,0,0),
-    (0,1.5,0.5,90,0,0),
-    (0,1.5,-0.5,-90,0,0),
-    (0.5,1.5,0,0,0,90),
-    (-0.5,1.5,0,0,0,-90)
+    (0, 1, 0, 180, 0, 0),  # 0: Bottom
+    (0, 2, 0, 0, 0, 0),  # 1: Top
+    (0, 1.5, 0.5, 90, 0, 0),  # 2: Front (+Z)
+    (0, 1.5, -0.5, -90, 0, 0),  # 3: Back (-Z)
+    (0.5, 1.5, 0, 0, 0, 90),  # 4: Right (+X)
+    (-0.5, 1.5, 0, 0, 0, -90),  # 5: Left (-X)
 ]
-seed = ord('y') + ord('o')
+
+seed = sum(ord(c) for c in 'cutie')
 octaves = 0.5
 frequency = 8
 amplitude = 1
+
 
 class Perlin:
     def __init__(self):
@@ -31,36 +35,207 @@ class Perlin:
             return 0
         return self.pNoise([x / self.freq, z / self.freq]) * self.amplitude
 
+
 def compute_height(noise, x, z):
-    return max(0, math.floor(noise.get_height(round(x / 2), round(z / 2)) * 7.5))
+    # Die Welt wird tiefer gemacht (Basis 15 + Variation), damit Platz für Höhlen ist!
+    val = noise.get_height(round(x / 2), round(z / 2))
+    return max(5, math.floor(15 + val * 15))
+
+
+cube_faces_arr = np.array(
+    [[f[0], f[1], f[2]] for f in cube_faces], dtype=np.float64
+)
+
+
+# ==========================================
+# MAGISCHE 3D NUMBA NOISE FÜR HÖHLEN
+# ==========================================
+@njit
+def hash_3d(x, y, z):
+    # Ein extrem schneller Hash-Algorithmus direkt in Numba
+    n = (x * 1619 + y * 31337 + z * 6971) % 2147483647
+    n = (n ^ (n >> 8)) * 19081 % 2147483647
+    n = (n ^ (n >> 9)) % 2147483647
+    return n / 2147483647.0
+
+
+@njit
+def noise_3d(x, y, z):
+    xi = int(math.floor(x));
+    yi = int(math.floor(y));
+    zi = int(math.floor(z))
+    xf = x - xi;
+    yf = y - yi;
+    zf = z - zi
+
+    # Smoothstep Interpolation
+    u = xf * xf * (3.0 - 2.0 * xf)
+    v = yf * yf * (3.0 - 2.0 * yf)
+    w = zf * zf * (3.0 - 2.0 * zf)
+
+    c000 = hash_3d(xi, yi, zi);
+    c100 = hash_3d(xi + 1, yi, zi)
+    c010 = hash_3d(xi, yi + 1, zi);
+    c110 = hash_3d(xi + 1, yi + 1, zi)
+    c001 = hash_3d(xi, yi, zi + 1);
+    c101 = hash_3d(xi + 1, yi, zi + 1)
+    c011 = hash_3d(xi, yi + 1, zi + 1);
+    c111 = hash_3d(xi + 1, yi + 1, zi + 1)
+
+    x00 = c000 + u * (c100 - c000);
+    x10 = c010 + u * (c110 - c010)
+    x01 = c001 + u * (c101 - c001);
+    x11 = c011 + u * (c111 - c011)
+
+    y0 = x00 + v * (x10 - x00)
+    y1 = x01 + v * (x11 - x01)
+
+    return y0 + w * (y1 - y0)
+
+
+@njit
+def fbm_3d(x, y, z):
+    # Fractal Brownian Motion für organischer aussehende Höhlen
+    return noise_3d(x, y, z) * 0.5 + noise_3d(x * 2.0, y * 2.0, z * 2.0) * 0.25
+
+
+@njit
+def is_solid(x, y, z, heights, ho_x, ho_z):
+    if y < 0:
+        return True  # Grundgestein (Bedrock)
+
+    hx = x - ho_x
+    hz = z - ho_z
+
+    if hx < 0 or hx >= heights.shape[0] or hz < 0 or hz >= heights.shape[1]:
+        return False
+
+    surface_y = heights[hx, hz]
+    if y > surface_y:
+        return False  # Luft über der Welt
+
+    # Schützt die oberen 3 Blöcke, damit keine Höhlen das Gras durchlöchern
+    depth = surface_y - y
+    if depth < 3:
+        return True
+
+    # Wenn der 3D-Noise-Wert hoch genug ist, wird der Block gelöscht = HÖHLE!
+    cave_val = fbm_3d(x * 0.08, y * 0.08, z * 0.08)
+    if cave_val > 0.45:  # <-- Ändere diesen Wert (z.B. 0.4 oder 0.5) für mehr/weniger Höhlen
+        return False
+
+    return True
+
+
+# ==========================================
+# 3D VOXEL MESHING
+# ==========================================
+@njit
+def process_chunk(heights, cf, x0, z0, cs, ho_x, ho_z):
+    # Sehr große Kapazität, da ein Chunk jetzt tausende sichtbare Höhlen-Flächen haben kann
+    cap = cs * cs * 150
+    px = np.empty(cap, np.float64)
+    py = np.empty(cap, np.float64)
+    pz = np.empty(cap, np.float64)
+    fi = np.empty(cap, np.int32)
+    n = 0
+
+    for x in range(x0, x0 + cs):
+        for z in range(z0, z0 + cs):
+            hx = x - ho_x
+            hz = z - ho_z
+            surface_y = heights[hx, hz]
+
+            # Scanne die Welt vertikal vom Boden bis zur Oberfläche
+            for y in range(0, surface_y + 1):
+                if is_solid(x, y, z, heights, ho_x, ho_z):
+
+                    # Bottom Face
+                    if not is_solid(x, y - 1, z, heights, ho_x, ho_z):
+                        px[n] = cf[0, 0] + x;
+                        py[n] = cf[0, 1] + y;
+                        pz[n] = cf[0, 2] + z;
+                        fi[n] = 0;
+                        n += 1
+
+                    # Top Face
+                    if not is_solid(x, y + 1, z, heights, ho_x, ho_z):
+                        px[n] = cf[1, 0] + x;
+                        py[n] = cf[1, 1] + y;
+                        pz[n] = cf[1, 2] + z;
+                        fi[n] = 1;
+                        n += 1
+
+                    # Front Face (+Z)
+                    if not is_solid(x, y, z + 1, heights, ho_x, ho_z):
+                        px[n] = cf[2, 0] + x;
+                        py[n] = cf[2, 1] + y;
+                        pz[n] = cf[2, 2] + z;
+                        fi[n] = 2;
+                        n += 1
+
+                    # Back Face (-Z)
+                    if not is_solid(x, y, z - 1, heights, ho_x, ho_z):
+                        px[n] = cf[3, 0] + x;
+                        py[n] = cf[3, 1] + y;
+                        pz[n] = cf[3, 2] + z;
+                        fi[n] = 3;
+                        n += 1
+
+                    # Right Face (+X)
+                    if not is_solid(x + 1, y, z, heights, ho_x, ho_z):
+                        px[n] = cf[4, 0] + x;
+                        py[n] = cf[4, 1] + y;
+                        pz[n] = cf[4, 2] + z;
+                        fi[n] = 4;
+                        n += 1
+
+                    # Left Face (-X)
+                    if not is_solid(x - 1, y, z, heights, ho_x, ho_z):
+                        px[n] = cf[5, 0] + x;
+                        py[n] = cf[5, 1] + y;
+                        pz[n] = cf[5, 2] + z;
+                        fi[n] = 5;
+                        n += 1
+
+    return px[:n], py[:n], pz[:n], fi[:n]
+
+
+# ==========================================
+# HAUPTPROGRAMM
+# ==========================================
+noise = Perlin()
+total = 32 * chunk_size
+hw = total + 2
+ho_x = xpos - 1
+ho_z = zpos - 1
+
+print("Generiere 2D Heightmap...")
+heights = np.empty((hw, hw), dtype=np.int32)
+for xi in range(hw):
+    for zi in range(hw):
+        heights[xi, zi] = compute_height(noise, ho_x + xi, ho_z + zi)
+
+print("Kompiliere Numba & generiere Chunks (mit Höhlen)...")
+# Initialer Aufruf (kompiliert das Skript)
+process_chunk(heights, cube_faces_arr, xpos, zpos, chunk_size, ho_x, ho_z)
 
 with open('chunks.txt', 'w') as yo:
-    noise = Perlin()
-    for x_chunk in range(32):
-        for z_chunk in range(32):
-            chunk_faces2 = []
-            chunk_faces3 = []
-            for x in range(xpos + x_chunk * chunk_size, xpos + x_chunk * chunk_size + chunk_size):
-                for z in range(zpos + z_chunk * chunk_size, zpos + z_chunk * chunk_size + chunk_size):
-                    y = compute_height(noise, x, z)
-                    if 1 < len(cube_faces):
-                        elem = cube_faces[1]
-                    else:
-                        elem = cube_faces[0]
-                    pos_top = Vec3(elem[0] + x, elem[1] + y, elem[2] + z)
-                    chunk_faces2.append(pos_top)
-                    chunk_faces3.append(1)
-                    for dx, dz, face_idx in [(-1,0,5), (1,0,4), (0,-1,3), (0,1,2)]:
-                        x_adj = x + dx
-                        z_adj = z + dz
-                        y_adj = compute_height(noise, x_adj, z_adj)
-                        if y_adj < y:
-                            if face_idx < len(cube_faces):
-                                elem = cube_faces[face_idx]
-                            else:
-                                elem = cube_faces[0]
-                            pos_side = Vec3(elem[0] + x, elem[1] + y, elem[2] + z)
-                            chunk_faces2.append(pos_side)
-                            chunk_faces3.append(face_idx)
-            if chunk_faces2 and len(chunk_faces2) == len(chunk_faces3):
-                yo.write(str([chunk_faces2, chunk_faces3]) + ",")
+    for xc in range(8):
+        for zc in range(8):
+            xs = xpos + xc * chunk_size
+            zs = zpos + zc * chunk_size
+
+            rpx, rpy, rpz, rfi = process_chunk(
+                heights, cube_faces_arr,
+                xs, zs, chunk_size,
+                ho_x, ho_z,
+            )
+
+            faces2 = [Vec3(rpx[i], rpy[i], rpz[i]) for i in range(len(rpx))]
+            faces3 = rfi.tolist()
+
+            if faces2 and len(faces2) == len(faces3):
+                yo.write(str([faces2, faces3]) + ",")
+
+print("Fertig! Chunks inklusive Höhlen exportiert.")
