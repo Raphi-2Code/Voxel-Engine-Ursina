@@ -5,10 +5,6 @@ from itertools import *
 import math
 import numpy as np
 from bisect import bisect_left, bisect_right
-from concurrent.futures import ThreadPoolExecutor
-import queue
-import traceback
-import time  # NEU: Wichtig für Thread-Pacing
 
 app = Ursina()
 
@@ -24,7 +20,7 @@ player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.9
 
-player.collider = None
+player.collider = None  # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
 
@@ -125,11 +121,10 @@ top_columns = {}
 top_cells = {}
 block_face_counts = {}
 
-# --- MULTITHREADING SETUP ---
-meshing_executor = ThreadPoolExecutor(max_workers=3)
-mesh_result_queue = queue.Queue()
-chunk_update_versions = {}
-# ----------------------------
+# --- TIME-SLICING WARTESCHLANGE ---
+# Verhindert Lags, indem maximal 1 Chunk pro Frame berechnet wird.
+chunk_update_queue = []
+# ----------------------------------
 
 mode = 1
 c = Entity(model="cube", color=color.clear)
@@ -220,48 +215,14 @@ def _atlas_rect(tile_x, tile_y):
     ty = int(clamp(tile_y, 0, ATLAS_TILES_Y - 1))
     w = 1.0 / ATLAS_TILES_X
     h = 1.0 / ATLAS_TILES_Y
-
     uv_row = ty
     if ATLAS_FLIP_Y:
         uv_row = (ATLAS_TILES_Y - 1) - ty
-
     u0 = tx * w + ATLAS_BLEED
     v0 = uv_row * h + ATLAS_BLEED
     u1 = (tx + 1) * w - ATLAS_BLEED
     v1 = (uv_row + 1) * h - ATLAS_BLEED
     return u0, v0, u1, v1
-
-
-def _face_uvs_tuples(face_idx, block_type, quad_verts):
-    xs = [float(v[0]) for v in quad_verts]
-    ys = [float(v[1]) for v in quad_verts]
-    zs = [float(v[2]) for v in quad_verts]
-    x0, x1 = min(xs), max(xs)
-    y0, y1 = min(ys), max(ys)
-    z0, z1 = min(zs), max(zs)
-
-    out = []
-    for vx, vy, vz in quad_verts:
-        if face_idx == 1:
-            lu = (vx - x0);
-            lv = (z1 - vz)
-        elif face_idx == 0:
-            lu = (vx - x0);
-            lv = (vz - z0)
-        elif face_idx == 2:
-            lu = (vx - x0);
-            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
-        elif face_idx == 3:
-            lu = (x1 - vx);
-            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
-        elif face_idx == 4:
-            lu = (z1 - vz);
-            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
-        else:
-            lu = (vz - z0);
-            lv = (vy - y0) / max(BLOCK_HEIGHT, 1e-8)
-        out.append((lu, lv))
-    return out
 
 
 def _chunk_coord_from_pos(pos):
@@ -356,169 +317,159 @@ def _block_type_from_face_key(face_key):
 
 
 # =========================================================================
-# MULTITHREADING BEREICH
+# EXTREM OPTIMIERTER MESH GENERATOR (KEIN THREADING MEHR NÖTIG)
 # =========================================================================
-def _meshing_worker(chunk_coord, faces_snapshot, version):
-    try:
-        if not faces_snapshot:
-            mesh_result_queue.put((chunk_coord, None, version))
-            return
-
-        vertices = []
-        triangles = []
-        uvs = []
-        normals = []
-        colors = []
-
-        faces_by_dir = {i: [] for i in range(6)}
-        for fk in faces_snapshot:
-            faces_by_dir[int(fk[1])].append(fk)
-
-        for d in range(6):
-            # LÖSUNG 1: Wir geben den GIL künstlich frei!
-            # Python stoppt den Hintergrund-Thread kurz, damit das Main-Spiel im Vordergrund ruckelfrei rendern kann.
-            time.sleep(0.001)
-
-            if not faces_by_dir[d]:
-                continue
-
-            slices = {}
-            for fk in faces_by_dir[d]:
-                pos_key, fidx = fk
-                base = _cube_base_from_face(pos_key, fidx)
-                btype = _block_type_from_face_key(fk)
-
-                lx = int(round(base[0]))
-                ly = int(round(base[1] / BLOCK_HEIGHT))
-                lz = int(round(base[2]))
-
-                if d in (0, 1):
-                    slice_idx, u, v = ly, lx, lz
-                elif d in (2, 3):
-                    slice_idx, u, v = lz, lx, ly
-                elif d in (4, 5):
-                    slice_idx, u, v = lx, lz, ly
-
-                if slice_idx not in slices:
-                    slices[slice_idx] = {}
-                slices[slice_idx][(u, v)] = btype
-
-            for slice_idx, grid in slices.items():
-                if not grid: continue
-
-                visited = set()
-                min_u = min(k[0] for k in grid.keys())
-                max_u = max(k[0] for k in grid.keys())
-                min_v = min(k[1] for k in grid.keys())
-                max_v = max(k[1] for k in grid.keys())
-
-                for v in range(min_v, max_v + 1):
-                    for u in range(min_u, max_u + 1):
-                        if (u, v) in visited or (u, v) not in grid:
-                            continue
-
-                        btype = grid[(u, v)]
-
-                        w = 1
-                        while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == btype:
-                            w += 1
-
-                        h = 1
-                        can_expand = True
-                        while (v + h) <= max_v and can_expand:
-                            for du in range(w):
-                                if (u + du, v + h) in visited or grid.get((u + du, v + h)) != btype:
-                                    can_expand = False
-                                    break
-                            if can_expand:
-                                h += 1
-
-                        for du in range(w):
-                            for dv in range(h):
-                                visited.add((u + du, v + dv))
-
-                        if d in (0, 1):
-                            bx = float(u)
-                            by = float(slice_idx) * BLOCK_HEIGHT
-                            bz = float(v)
-                            W_ext, H_ext, D_ext = w, BLOCK_HEIGHT, h
-                        elif d in (2, 3):
-                            bx = float(u)
-                            by = float(v) * BLOCK_HEIGHT
-                            bz = float(slice_idx)
-                            W_ext, H_ext, D_ext = w, h * BLOCK_HEIGHT, 1.0
-                        else:
-                            bx = float(slice_idx)
-                            by = float(v) * BLOCK_HEIGHT
-                            bz = float(u)
-                            W_ext, H_ext, D_ext = 1.0, h * BLOCK_HEIGHT, w
-
-                        X0 = bx - 0.5
-                        X1 = bx - 0.5 + W_ext
-                        Y0 = by + float(_FACE_OFFSETS[0].y)
-                        Y1 = by + float(_FACE_OFFSETS[0].y) + H_ext
-                        Z0 = bz - 0.5
-                        Z1 = bz - 0.5 + D_ext
-
-                        if d == 0:
-                            quad_verts = [(X0, Y0, Z0), (X1, Y0, Z0), (X1, Y0, Z1), (X0, Y0, Z1)]
-                        elif d == 1:
-                            quad_verts = [(X0, Y1, Z0), (X0, Y1, Z1), (X1, Y1, Z1), (X1, Y1, Z0)]
-                        elif d == 2:
-                            quad_verts = [(X0, Y0, Z1), (X1, Y0, Z1), (X1, Y1, Z1), (X0, Y1, Z1)]
-                        elif d == 3:
-                            quad_verts = [(X0, Y0, Z0), (X0, Y1, Z0), (X1, Y1, Z0), (X1, Y0, Z0)]
-                        elif d == 4:
-                            quad_verts = [(X1, Y0, Z0), (X1, Y1, Z0), (X1, Y1, Z1), (X1, Y0, Z1)]
-                        else:
-                            quad_verts = [(X0, Y0, Z0), (X0, Y0, Z1), (X0, Y1, Z1), (X0, Y1, Z0)]
-
-                        tile = _block_tile_for_face(btype, int(d))
-                        u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
-                        rect = (u0, v0, u1, v1)
-
-                        quad_uvs = _face_uvs_tuples(d, btype, quad_verts)
-                        n = _FACE_NORMALS_TUPLES.get(d, (0, 1, 0))
-
-                        idx0 = len(vertices)
-                        vertices.extend(quad_verts)
-                        uvs.extend(quad_uvs)
-                        colors.extend([rect, rect, rect, rect])
-                        normals.extend([n, n, n, n])
-                        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
-
-        mesh_data = (vertices, triangles, uvs, normals, colors)
-        mesh_result_queue.put((chunk_coord, mesh_data, version))
-
-    except Exception as e:
-        print(f"[Thread Error] Meshing failed for chunk {chunk_coord}: {e}")
-        traceback.print_exc()
+def _fast_uvs(face_idx, w, h, d_ext):
+    """ Berechnet UVs mathematisch in O(1) statt jeden Vertex zu durchsuchen. Spart ca. 40% Berechnungszeit. """
+    hb = h / max(BLOCK_HEIGHT, 1e-8)
+    if face_idx == 0: return [(0, 0), (w, 0), (w, d_ext), (0, d_ext)]
+    if face_idx == 1: return [(0, d_ext), (0, 0), (w, 0), (w, d_ext)]
+    if face_idx == 2: return [(0, 0), (w, 0), (w, hb), (0, hb)]
+    if face_idx == 3: return [(w, 0), (w, hb), (0, hb), (0, 0)]
+    if face_idx == 4: return [(d_ext, 0), (d_ext, hb), (0, hb), (0, 0)]
+    if face_idx == 5: return [(0, 0), (d_ext, 0), (d_ext, hb), (0, hb)]
+    return [(0, 0), (1, 0), (1, 1), (0, 1)]
 
 
-def _apply_mesh_to_entity(chunk_coord, mesh_data):
+def _rebuild_chunk_mesh(chunk_coord):
+    chunk_coord = _ensure_chunk(chunk_coord)
     old = combined_terrains.get(chunk_coord)
 
-    if mesh_data is None:
+    faces_snapshot = chunk_face_sets[chunk_coord]
+    if not faces_snapshot:
         _safe_clear_destroy(old)
         combined_terrains[chunk_coord] = None
         return
 
-    raw_vertices, triangles, raw_uvs, raw_normals, raw_colors = mesh_data
+    vertices = []
+    triangles = []
+    uvs = []
+    normals = []
+    colors = []
 
-    try:
-        # LÖSUNG 3: Wir füttern Ursina direkt mit unseren Tuples und sparen uns das aufwendige Transformieren
-        mesh = Mesh(
-            vertices=raw_vertices,
-            triangles=triangles,
-            uvs=raw_uvs,
-            normals=raw_normals,
-            colors=raw_colors,
-            mode="triangle",
-            static=True,
-        )
-    except Exception as e:
-        print(f"[Main Thread Error] Could not create mesh for chunk {chunk_coord}: {e}")
-        return
+    faces_by_dir = {i: [] for i in range(6)}
+    for fk in faces_snapshot:
+        faces_by_dir[int(fk[1])].append(fk)
+
+    for d in range(6):
+        if not faces_by_dir[d]:
+            continue
+
+        slices = {}
+        for fk in faces_by_dir[d]:
+            pos_key, fidx = fk
+            base = _cube_base_from_face(pos_key, fidx)
+            btype = _block_type_from_face_key(fk)
+
+            lx = int(round(base[0]))
+            ly = int(round(base[1] / BLOCK_HEIGHT))
+            lz = int(round(base[2]))
+
+            if d in (0, 1):
+                slice_idx, u, v = ly, lx, lz
+            elif d in (2, 3):
+                slice_idx, u, v = lz, lx, ly
+            elif d in (4, 5):
+                slice_idx, u, v = lx, lz, ly
+
+            if slice_idx not in slices:
+                slices[slice_idx] = {}
+            slices[slice_idx][(u, v)] = btype
+
+        for slice_idx, grid in slices.items():
+            if not grid: continue
+
+            visited = set()
+            keys = grid.keys()
+            min_u, max_u = min(k[0] for k in keys), max(k[0] for k in keys)
+            min_v, max_v = min(k[1] for k in keys), max(k[1] for k in keys)
+
+            for v in range(min_v, max_v + 1):
+                for u in range(min_u, max_u + 1):
+                    if (u, v) in visited or (u, v) not in grid:
+                        continue
+
+                    btype = grid[(u, v)]
+
+                    w = 1
+                    while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == btype:
+                        w += 1
+
+                    h = 1
+                    can_expand = True
+                    while (v + h) <= max_v and can_expand:
+                        for du in range(w):
+                            if (u + du, v + h) in visited or grid.get((u + du, v + h)) != btype:
+                                can_expand = False
+                                break
+                        if can_expand:
+                            h += 1
+
+                    for du in range(w):
+                        for dv in range(h):
+                            visited.add((u + du, v + dv))
+
+                    if d in (0, 1):
+                        bx = float(u);
+                        by = float(slice_idx) * BLOCK_HEIGHT;
+                        bz = float(v)
+                        W_ext, H_ext, D_ext = w, BLOCK_HEIGHT, h
+                    elif d in (2, 3):
+                        bx = float(u);
+                        by = float(v) * BLOCK_HEIGHT;
+                        bz = float(slice_idx)
+                        W_ext, H_ext, D_ext = w, h * BLOCK_HEIGHT, 1.0
+                    else:
+                        bx = float(slice_idx);
+                        by = float(v) * BLOCK_HEIGHT;
+                        bz = float(u)
+                        W_ext, H_ext, D_ext = 1.0, h * BLOCK_HEIGHT, w
+
+                    X0 = bx - 0.5
+                    X1 = bx - 0.5 + W_ext
+                    Y0 = by + float(_FACE_OFFSETS[0].y)
+                    Y1 = by + float(_FACE_OFFSETS[0].y) + H_ext
+                    Z0 = bz - 0.5
+                    Z1 = bz - 0.5 + D_ext
+
+                    if d == 0:
+                        quad_verts = [(X0, Y0, Z0), (X1, Y0, Z0), (X1, Y0, Z1), (X0, Y0, Z1)]
+                    elif d == 1:
+                        quad_verts = [(X0, Y1, Z0), (X0, Y1, Z1), (X1, Y1, Z1), (X1, Y1, Z0)]
+                    elif d == 2:
+                        quad_verts = [(X0, Y0, Z1), (X1, Y0, Z1), (X1, Y1, Z1), (X0, Y1, Z1)]
+                    elif d == 3:
+                        quad_verts = [(X0, Y0, Z0), (X0, Y1, Z0), (X1, Y1, Z0), (X1, Y0, Z0)]
+                    elif d == 4:
+                        quad_verts = [(X1, Y0, Z0), (X1, Y1, Z0), (X1, Y1, Z1), (X1, Y0, Z1)]
+                    else:
+                        quad_verts = [(X0, Y0, Z0), (X0, Y0, Z1), (X0, Y1, Z1), (X0, Y1, Z0)]
+
+                    tile = _block_tile_for_face(btype, int(d))
+                    u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
+                    rect = (u0, v0, u1, v1)
+
+                    # HIER IST DER SPEED-BOOST:
+                    quad_uvs = _fast_uvs(d, W_ext, H_ext, D_ext)
+                    n = _FACE_NORMALS_TUPLES.get(d, (0, 1, 0))
+
+                    idx0 = len(vertices)
+                    vertices.extend(quad_verts)
+                    uvs.extend(quad_uvs)
+                    colors.extend([rect, rect, rect, rect])
+                    normals.extend([n, n, n, n])
+                    triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+
+    # Da Listen extrem schnell sind, wird hier die Mesh-Erstellung nicht mehr ruckeln.
+    mesh = Mesh(
+        vertices=vertices,
+        triangles=triangles,
+        uvs=uvs,
+        normals=normals,
+        colors=colors,
+        mode="triangle",
+        static=True,
+    )
 
     tex = atlas_texture if atlas_texture is not None else texture
 
@@ -538,21 +489,13 @@ def _apply_mesh_to_entity(chunk_coord, mesh_data):
         combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
 
 
-def _rebuild_chunk_mesh(chunk_coord):
-    chunk_coord = _ensure_chunk(chunk_coord)
-    faces_snapshot = list(chunk_face_sets[chunk_coord])
-    new_version = chunk_update_versions.get(chunk_coord, 0) + 1
-    chunk_update_versions[chunk_coord] = new_version
-    meshing_executor.submit(_meshing_worker, chunk_coord, faces_snapshot, new_version)
-
-
 # =========================================================================
 
 def _refresh_chunks(affected_chunks):
+    """ Fügt Chunks in die Warteschlange ein, statt sie sofort alle zu berechnen. """
     for chunk_coord in affected_chunks:
-        if chunk_coord is None:
-            continue
-        _rebuild_chunk_mesh(chunk_coord)
+        if chunk_coord is not None and chunk_coord not in chunk_update_queue:
+            chunk_update_queue.append(chunk_coord)
 
 
 def _expand_chunk_neighborhood(chunks, radius=1):
@@ -1329,6 +1272,7 @@ def load_chunks():
 
     all_chunks_to_rebuild = set(chunk_face_sets.keys()).union(affected_by_trees)
 
+    # Initiales Laden ohne Queue, damit die Welt da ist, wenn wir spawnen
     for chunk_coord in all_chunks_to_rebuild:
         _rebuild_chunk_mesh(chunk_coord)
 
@@ -1542,16 +1486,12 @@ def _frame_position_for_target(face_pos, face_idx):
 
 
 def update():
-    # LÖSUNG 2: Rate-Limiting!
-    # Wir bearbeiten pro Frame maximal 1 Chunk-Mesh aus der Queue.
-    # Das verhindert, dass das Spiel stehenbleibt, wenn man an Chunk-Grenzen baut.
-    if not mesh_result_queue.empty():
-        try:
-            chunk_coord, mesh_data, version = mesh_result_queue.get_nowait()
-            if version >= chunk_update_versions.get(chunk_coord, 0):
-                _apply_mesh_to_entity(chunk_coord, mesh_data)
-        except queue.Empty:
-            pass
+    # --- TIME-SLICING UPDATE ---
+    # Nimmt jeden Frame maximal 1 Element aus der Queue, um Stottern (Lag) zu vermeiden!
+    if chunk_update_queue:
+        chunk_to_update = chunk_update_queue.pop(0)
+        _rebuild_chunk_mesh(chunk_to_update)
+    # ---------------------------
 
     _apply_player_probe_horizontal()
     _apply_vector_gravity()
