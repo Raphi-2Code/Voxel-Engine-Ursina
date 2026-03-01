@@ -122,7 +122,7 @@ top_cells = {}
 block_face_counts = {}
 
 # --- TIME-SLICING WARTESCHLANGE ---
-# Verhindert Lags, indem maximal 1 Chunk pro Frame berechnet wird.
+# Verhindert Lags, indem maximal 1 Chunk pro Frame berechnet wird (für Hintergrund-Updates).
 chunk_update_queue = []
 # ----------------------------------
 
@@ -317,10 +317,9 @@ def _block_type_from_face_key(face_key):
 
 
 # =========================================================================
-# EXTREM OPTIMIERTER MESH GENERATOR (KEIN THREADING MEHR NÖTIG)
+# EXTREM OPTIMIERTER MESH GENERATOR
 # =========================================================================
 def _fast_uvs(face_idx, w, h, d_ext):
-    """ Berechnet UVs mathematisch in O(1) statt jeden Vertex zu durchsuchen. Spart ca. 40% Berechnungszeit. """
     hb = h / max(BLOCK_HEIGHT, 1e-8)
     if face_idx == 0: return [(0, 0), (w, 0), (w, d_ext), (0, d_ext)]
     if face_idx == 1: return [(0, d_ext), (0, 0), (w, 0), (w, d_ext)]
@@ -449,7 +448,6 @@ def _rebuild_chunk_mesh(chunk_coord):
                     u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
                     rect = (u0, v0, u1, v1)
 
-                    # HIER IST DER SPEED-BOOST:
                     quad_uvs = _fast_uvs(d, W_ext, H_ext, D_ext)
                     n = _FACE_NORMALS_TUPLES.get(d, (0, 1, 0))
 
@@ -460,7 +458,6 @@ def _rebuild_chunk_mesh(chunk_coord):
                     normals.extend([n, n, n, n])
                     triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
 
-    # Da Listen extrem schnell sind, wird hier die Mesh-Erstellung nicht mehr ruckeln.
     mesh = Mesh(
         vertices=vertices,
         triangles=triangles,
@@ -492,7 +489,6 @@ def _rebuild_chunk_mesh(chunk_coord):
 # =========================================================================
 
 def _refresh_chunks(affected_chunks):
-    """ Fügt Chunks in die Warteschlange ein, statt sie sofort alle zu berechnen. """
     for chunk_coord in affected_chunks:
         if chunk_coord is not None and chunk_coord not in chunk_update_queue:
             chunk_update_queue.append(chunk_coord)
@@ -1439,6 +1435,14 @@ def build():
             tgt = _chunk_coord_from_face(fp, i)
             _add_face(same, tgt, affected)
 
+    # --- OPTIMIERUNG ---
+    # Den Haupt-Chunk sofort updaten, um Verzögerung zu verhindern
+    main_chunk = _chunk_coord_from_pos(cube_base)
+    if main_chunk in affected:
+        _rebuild_chunk_mesh(main_chunk)
+        affected.discard(main_chunk)
+
+    # Nur angrenzende Chunks in die Queue packen
     _refresh_chunks(affected)
     c.y = -9999
 
@@ -1464,19 +1468,20 @@ def mine(face_pos=None, face_idx=None):
             tgt = _chunk_coord_from_face(fp, _OPPOSITE_FACE[i])
             _add_face(opp, tgt, affected)
 
-    for i in range(len(_FACE_OFFSETS)):
-        fp = _face_pos_from_base(cube_base, i)
-        same = _face_key(fp, i)
-        if same in world_faces:
-            _remove_face(same, affected)
-
     block_types.pop(cube_base, None)
 
     below = _vkey((cube_base[0], cube_base[1] - BLOCK_HEIGHT, cube_base[2]))
     if below in block_types and _normalize_block_type(block_types[below]) == "grass":
         _set_block_type(below, "dirt")
 
-    _refresh_chunks(_expand_chunk_neighborhood(affected, radius=1))
+    # --- OPTIMIERUNG ---
+    # Hauptchunk sofort neu bauen = kein Lag / Input-Delay mehr
+    main_chunk = _chunk_coord_from_pos(cube_base)
+    if main_chunk in affected:
+        _rebuild_chunk_mesh(main_chunk)
+        affected.discard(main_chunk)
+
+    _refresh_chunks(affected)
     c.y = -9999
 
 
@@ -1486,12 +1491,10 @@ def _frame_position_for_target(face_pos, face_idx):
 
 
 def update():
-    # --- TIME-SLICING UPDATE ---
     # Nimmt jeden Frame maximal 1 Element aus der Queue, um Stottern (Lag) zu vermeiden!
     if chunk_update_queue:
         chunk_to_update = chunk_update_queue.pop(0)
         _rebuild_chunk_mesh(chunk_to_update)
-    # ---------------------------
 
     _apply_player_probe_horizontal()
     _apply_vector_gravity()
