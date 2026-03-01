@@ -18,9 +18,9 @@ player.cursor.texture = "cursor"
 player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
-player.camera_pivot.y = 1.28  # Vorerst geaendert
+player.camera_pivot.y = 1.28
 camera.fov = 120
-player.collider = None  # FIX: keine Ursina-Kollision
+player.collider = None
 
 Sky(texture="clouds.png")
 
@@ -127,6 +127,9 @@ block_face_counts = {}
 
 chunk_update_queue = []
 
+# NEU: Speichert die Höhen der ursprünglichen natürlichen Oberfläche
+surface_heights = {}
+
 mode = 1
 c = Entity(model="cube", color=color.clear)
 c2 = Entity(model="cube", texture="2", scale=1.01)
@@ -186,7 +189,6 @@ is_grounded = False
 prev_horizontal_x = None
 prev_horizontal_z = None
 
-# NEU: Zählt die exakten Frames, solange eine Taste gedrückt ist.
 key_hold_frames = {"w": 0, "a": 0, "s": 0, "d": 0}
 
 
@@ -298,21 +300,58 @@ def _set_block_type(base, block_type):
             face_block_types[fk] = btype
 
 
+def _infer_natural_block_type(base):
+    """Berechnet deterministisch den natürlichen Blocktyp (Gras, Erde, Stein) anhand der Tiefe."""
+    x, y, z = base
+    col = (x, z)
+
+    # Nimm die Ursprungsoberfläche dieser Säule. Falls wir die Spalte nicht kennen (sollte
+    # eigentlich nicht passieren), nimm an der momentane Block ist die Spitze.
+    top_y = surface_heights.get(col, y)
+
+    # Bestimme die Tiefe (0 = Spitze, >0 = Untergrund)
+    depth = int(round((top_y - y) / BLOCK_HEIGHT))
+
+    if depth <= 0:
+        return "grass"
+
+    # Berechne wie dick die Erdschicht an dieser (x, z) Stelle ist (1 bis 5 Blöcke)
+    rand_val = abs(math.sin(x * 12.9898 + z * 78.233 + seed) * 43758.5453)
+    dirt_thickness = 1 + int((rand_val - math.floor(rand_val)) * 5)
+
+    # Alles ab der berechneten Erdschicht und tiefer wird durchgehend Stein
+    if depth >= dirt_thickness:
+        return "stone"
+
+    return "dirt"
+
+
 def _apply_surface_layers():
-    top_y_by_col = {}
+    global surface_heights
+    surface_heights.clear()
+
+    # 1. Ermittle den absolut höchsten natürlichen Punkt für jede X/Z Spalte und speichere ihn global ab
     for base in block_types.keys():
         col = (base[0], base[2])
         y = base[1]
-        prev = top_y_by_col.get(col)
+        prev = surface_heights.get(col)
         if prev is None or y > prev:
-            top_y_by_col[col] = y
+            surface_heights[col] = y
 
+    # 2. Block-Typen deterministisch aufsetzen (sodass ab Tiefe 1-5 *alles* aus Stein ist)
     for base, btype in list(block_types.items()):
-        if _normalize_block_type(btype) != "grass":
+        current_btype = _normalize_block_type(btype)
+        if current_btype not in ("grass", "dirt", "stone"):
             continue
-        col = (base[0], base[2])
-        if base[1] < top_y_by_col[col]:
-            _set_block_type(base, "dirt")
+
+        new_type = _infer_natural_block_type(base)
+        _set_block_type(base, new_type)
+
+
+def _infer_block_type_for_hidden_block(base):
+    # Wird aufgerufen, wenn ein bisher komplett versteckter Block durch Abbauen freigelegt wird.
+    # Nutzt exakt dieselbe Logik, damit alles ab einer gewissen Tiefe dauerhaft Stein ist.
+    return _infer_natural_block_type(base)
 
 
 def _block_type_from_face_key(face_key):
@@ -1126,19 +1165,6 @@ def _remove_face(face_key, affected):
     return True
 
 
-def _infer_block_type_for_hidden_block(base):
-    above = _vkey((base[0], base[1] + BLOCK_HEIGHT, base[2]))
-    above_type = block_types.get(above)
-
-    if above_type is not None:
-        above_type = _normalize_block_type(above_type)
-        if above_type in ("grass", "dirt"):
-            return "dirt"
-        return above_type
-
-    return "dirt"
-
-
 def _add_face(face_key, chunk_coord, affected, block_type=None):
     chunk_coord = _ensure_chunk(chunk_coord)
     if face_key in world_faces:
@@ -1209,6 +1235,7 @@ def generate_tree(x, y, z, affected):
 
 
 def load_chunks():
+    global surface_heights
     world_faces.clear()
     face_to_chunk.clear()
     face_block_types.clear()
@@ -1216,6 +1243,7 @@ def load_chunks():
     top_columns.clear()
     top_cells.clear()
     block_face_counts.clear()
+    surface_heights.clear()
     _reset_chunk_storage()
 
     try:
@@ -1251,6 +1279,7 @@ def load_chunks():
     except Exception as e:
         print(f"Error loading chunks.txt: {e}")
 
+    # Aktualisiert die Oberflächen und bestimmt deterministisch Tiefe/Stein-Schichten
     _apply_surface_layers()
 
     affected_by_trees = set()
@@ -1480,9 +1509,6 @@ def _frame_position_for_target(face_pos, face_idx):
 def update():
     global key_hold_frames
 
-    # --- NEU: Frame-basierte "Hold" Simulation ---
-    # Führt die Logik (input) exakt 6 Mal aus (einmal pro Frame),
-    # in den ersten 6 Frames nachdem die Taste gedrückt und gehalten wird.
     for k in ("w", "a", "s", "d"):
         if held_keys[k]:
             key_hold_frames[k] += 1
@@ -1490,7 +1516,6 @@ def update():
                 input(k)
         else:
             key_hold_frames[k] = 0
-    # ---------------------------------------------
 
     if chunk_update_queue:
         chunk_to_update = chunk_update_queue.pop(0)
