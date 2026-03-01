@@ -18,8 +18,8 @@ player.cursor.texture = "cursor"
 player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
-player.camera_pivot.y = 1.9
-
+player.camera_pivot.y = 1.28 #Vorerst geaendert
+camera.fov = 120
 player.collider = None  # FIX: keine Ursina-Kollision
 
 Sky(texture="clouds.png")
