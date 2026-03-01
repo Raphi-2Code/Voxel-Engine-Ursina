@@ -19,7 +19,7 @@ player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.28
-camera.fov = 120
+camera.fov = 120 #USE 90 IF YOU WANT
 player.collider = None
 
 Sky(texture="clouds.png")
