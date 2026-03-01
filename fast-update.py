@@ -18,7 +18,7 @@ player.cursor.texture = "cursor"
 player.cursor.scale = 0.04
 player.speed = 5
 player.height = PLAYER_HEIGHT
-player.camera_pivot.y = 1.28 #Vorerst geaendert
+player.camera_pivot.y = 1.28  # Vorerst geaendert
 camera.fov = 120
 player.collider = None  # FIX: keine Ursina-Kollision
 
@@ -121,10 +121,7 @@ top_columns = {}
 top_cells = {}
 block_face_counts = {}
 
-# --- TIME-SLICING WARTESCHLANGE ---
-# Verhindert Lags, indem maximal 1 Chunk pro Frame berechnet wird (für Hintergrund-Updates).
 chunk_update_queue = []
-# ----------------------------------
 
 mode = 1
 c = Entity(model="cube", color=color.clear)
@@ -184,6 +181,9 @@ vertical_velocity = 0.0
 is_grounded = False
 prev_horizontal_x = None
 prev_horizontal_z = None
+
+# NEU: Zählt die exakten Frames, solange eine Taste gedrückt ist.
+key_hold_frames = {"w": 0, "a": 0, "s": 0, "d": 0}
 
 
 def _vkey(v):
@@ -316,9 +316,6 @@ def _block_type_from_face_key(face_key):
     return _normalize_block_type(block_types.get(base, DEFAULT_BLOCK_TYPE))
 
 
-# =========================================================================
-# EXTREM OPTIMIERTER MESH GENERATOR
-# =========================================================================
 def _fast_uvs(face_idx, w, h, d_ext):
     hb = h / max(BLOCK_HEIGHT, 1e-8)
     if face_idx == 0: return [(0, 0), (w, 0), (w, d_ext), (0, d_ext)]
@@ -485,8 +482,6 @@ def _rebuild_chunk_mesh(chunk_coord):
         _safe_clear_destroy(old)
         combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
 
-
-# =========================================================================
 
 def _refresh_chunks(affected_chunks):
     for chunk_coord in affected_chunks:
@@ -1268,15 +1263,8 @@ def load_chunks():
 
     all_chunks_to_rebuild = set(chunk_face_sets.keys()).union(affected_by_trees)
 
-    # Initiales Laden ohne Queue, damit die Welt da ist, wenn wir spawnen
     for chunk_coord in all_chunks_to_rebuild:
         _rebuild_chunk_mesh(chunk_coord)
-
-    print(f"[gravity] faces={len(world_faces)} blocks={len(block_face_counts)} columns={len(top_columns)}")
-    if len(world_faces) > 0 and len(block_face_counts) == 0:
-        for face_key in world_faces:
-            _register_top_face(face_key[0], face_key[1])
-        print(f"[gravity] rebuilt blocks={len(block_face_counts)} columns={len(top_columns)}")
 
 
 load_chunks()
@@ -1435,14 +1423,11 @@ def build():
             tgt = _chunk_coord_from_face(fp, i)
             _add_face(same, tgt, affected)
 
-    # --- OPTIMIERUNG ---
-    # Den Haupt-Chunk sofort updaten, um Verzögerung zu verhindern
     main_chunk = _chunk_coord_from_pos(cube_base)
     if main_chunk in affected:
         _rebuild_chunk_mesh(main_chunk)
         affected.discard(main_chunk)
 
-    # Nur angrenzende Chunks in die Queue packen
     _refresh_chunks(affected)
     c.y = -9999
 
@@ -1474,8 +1459,6 @@ def mine(face_pos=None, face_idx=None):
     if below in block_types and _normalize_block_type(block_types[below]) == "grass":
         _set_block_type(below, "dirt")
 
-    # --- OPTIMIERUNG ---
-    # Hauptchunk sofort neu bauen = kein Lag / Input-Delay mehr
     main_chunk = _chunk_coord_from_pos(cube_base)
     if main_chunk in affected:
         _rebuild_chunk_mesh(main_chunk)
@@ -1491,7 +1474,20 @@ def _frame_position_for_target(face_pos, face_idx):
 
 
 def update():
-    # Nimmt jeden Frame maximal 1 Element aus der Queue, um Stottern (Lag) zu vermeiden!
+    global key_hold_frames
+
+    # --- NEU: Frame-basierte "Hold" Simulation ---
+    # Führt die Logik (input) exakt 6 Mal aus (einmal pro Frame),
+    # in den ersten 6 Frames nachdem die Taste gedrückt und gehalten wird.
+    for k in ("w", "a", "s", "d"):
+        if held_keys[k]:
+            key_hold_frames[k] += 1
+            if 1 < key_hold_frames[k] <= 7:
+                input(k)
+        else:
+            key_hold_frames[k] = 0
+    # ---------------------------------------------
+
     if chunk_update_queue:
         chunk_to_update = chunk_update_queue.pop(0)
         _rebuild_chunk_mesh(chunk_to_update)
