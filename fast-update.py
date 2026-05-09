@@ -70,11 +70,13 @@ BLOCK_SELECT_KEYS = {
     "-": "wool", "=": "stone"
 }
 
-# Block-Rotation: gespeichert wird (lokale Oberseite, lokale Vorderseite) als
-# Welt-Flächen-Index. Dadurch kann ein Block nicht nur zur Seite/Decke kippen,
-# sondern auf Ober-/Unterseiten auch nach Spieler-Blickrichtung gedreht werden.
-# 0 = unten, 1 = oben, 2 = +Z, 3 = -Z, 4 = +X, 5 = -X.
-DEFAULT_BLOCK_ROTATION = 1
+# Block-Rotation: Nur Y-Achse/Yaw.
+# Gespeichert wird die horizontale Richtung, in die die lokale Vorderseite zeigt.
+# 2 = +Z, 3 = -Z, 4 = +X, 5 = -X.
+# Die lokale Oberseite bleibt IMMER Welt-Oberseite (Face 1) und die Unterseite
+# bleibt IMMER Face 0. Dadurch können Gras/Erde/etc. nicht mehr seitlich kippen.
+DEFAULT_BLOCK_ROTATION = 2
+HORIZONTAL_ROTATION_FACES = (2, 3, 4, 5)
 ROTATABLE_BLOCK_TYPES = set(BLOCK_FACE_TILES.keys())
 
 atlas_texture = load_texture(texture)
@@ -255,38 +257,42 @@ def _vec_cross(a, b):
 
 
 def _default_forward_face_for_up(up_face_idx):
-    up_face_idx = _normalize_face_index(up_face_idx)
-    up_axis = _FACE_NORMALS_TUPLES[up_face_idx]
+    # Rotation ist jetzt absichtlich nur noch Y-Achse.
+    # Diese Funktion bleibt als Fallback für ältere Aufrufe erhalten.
+    return DEFAULT_BLOCK_ROTATION
 
-    # Bei normaler Ober-/Unterseite zeigt die lokale Vorderseite standardmäßig +Z.
-    # Bei seitlich gekippten Blöcken zeigt sie nach oben, damit Wand-Texturen
-    # nicht liegen, sondern aufrecht wirken.
-    candidates = [1, 2, 4, 3, 5, 0]
-    if up_face_idx in (0, 1):
-        candidates = [2, 4, 3, 5]
 
-    for candidate in candidates:
-        candidate_axis = _FACE_NORMALS_TUPLES[candidate]
-        if _vec_dot(up_axis, candidate_axis) == 0:
-            return candidate
-    return 2
+def _normalize_horizontal_rotation_face(face_idx, default=DEFAULT_BLOCK_ROTATION):
+    idx = _normalize_face_index(face_idx, default)
+    if idx in HORIZONTAL_ROTATION_FACES:
+        return idx
+    return int(default)
 
 
 def _normalize_block_rotation(rotation):
-    # Altes Format: nur ein Face-Index. Neues Format: (up_face, forward_face).
+    # Nur Y-Achse/Yaw: Rückgabe bleibt aus Kompatibilitätsgründen ein Tupel
+    # (up_face, forward_face), aber up_face ist IMMER 1.
+    #
+    # Kompatibilität mit der vorherigen Version:
+    # - (1, horizontal) bleibt erhalten.
+    # - (horizontal, 1) aus der alten "gekippte Blöcke"-Variante wird zu
+    #   (1, horizontal), damit alte Wand-Platzierungen nicht mehr kippen.
+    # - einzelne horizontale Face-Indizes werden direkt als Yaw benutzt.
+    forward_face = DEFAULT_BLOCK_ROTATION
+
     if isinstance(rotation, (tuple, list)) and len(rotation) >= 2:
-        up_face = _normalize_face_index(rotation[0])
-        forward_face = _normalize_face_index(rotation[1], _default_forward_face_for_up(up_face))
+        first = _normalize_face_index(rotation[0], DEFAULT_BLOCK_ROTATION)
+        second = _normalize_face_index(rotation[1], DEFAULT_BLOCK_ROTATION)
+        if second in HORIZONTAL_ROTATION_FACES:
+            forward_face = second
+        elif first in HORIZONTAL_ROTATION_FACES:
+            forward_face = first
     else:
-        up_face = _normalize_face_index(rotation)
-        forward_face = _default_forward_face_for_up(up_face)
+        idx = _normalize_face_index(rotation, DEFAULT_BLOCK_ROTATION)
+        if idx in HORIZONTAL_ROTATION_FACES:
+            forward_face = idx
 
-    up_axis = _FACE_NORMALS_TUPLES[up_face]
-    forward_axis = _FACE_NORMALS_TUPLES[forward_face]
-    if _vec_dot(up_axis, forward_axis) != 0:
-        forward_face = _default_forward_face_for_up(up_face)
-
-    return (up_face, forward_face)
+    return (1, forward_face)
 
 
 def _rotation_axes(rotation):
@@ -351,9 +357,8 @@ def _block_rotation_from_base(base, block_type=None):
     btype = _normalize_block_type(block_type)
     raw_rotation = _normalize_block_rotation(block_rotations.get(base, DEFAULT_BLOCK_ROTATION))
 
-    # Natürliche Blöcke bleiben default, weil sie mit DEFAULT_BLOCK_ROTATION
-    # gespeichert werden. Manuell platzierte Blöcke drehen ihre Face-Texturen
-    # wirklich mit der gespeicherten Richtung mit.
+    # Nur Y-Achse: Top/Bottom bleiben immer Top/Bottom. Die gespeicherte Rotation
+    # dreht nur die horizontale Ausrichtung der Textur/Face-Zuordnung.
     if btype not in ROTATABLE_BLOCK_TYPES:
         return _normalize_block_rotation(DEFAULT_BLOCK_ROTATION)
     return raw_rotation
@@ -1758,21 +1763,23 @@ def _horizontal_face_from_direction(direction):
 
 
 def _placement_rotation_from_face(placement_face_idx):
-    up_face = _normalize_face_index(placement_face_idx)
+    face_idx = _normalize_face_index(placement_face_idx)
 
-    # Auf Boden/Decke wird zusätzlich nach der Blickrichtung gedreht.
-    # An Wänden kippt der Block zur Wand und bleibt mit seiner Vorderseite aufrecht.
-    if up_face in (0, 1):
+    # Nur Y-Achse:
+    # - Beim Platzieren an einer Wand nimmt der neue Block die Wand-Richtung als Yaw.
+    # - Beim Platzieren auf Boden/Decke nimmt er die horizontale Blickrichtung.
+    # Dadurch bleiben Gras-Oberseite und Unterseite immer korrekt oben/unten.
+    if face_idx in HORIZONTAL_ROTATION_FACES:
+        forward_face = face_idx
+    else:
         forward = Vec3(camera.forward)
         forward.y = 0
         if forward.length_squared() <= 1e-8:
             forward = Vec3(player.forward)
             forward.y = 0
         forward_face = _horizontal_face_from_direction(forward)
-    else:
-        forward_face = 1
 
-    return _normalize_block_rotation((up_face, forward_face))
+    return _normalize_block_rotation(forward_face)
 
 
 def build(placement_rotation=DEFAULT_BLOCK_ROTATION):
