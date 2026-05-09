@@ -70,6 +70,13 @@ BLOCK_SELECT_KEYS = {
     "-": "wool", "=": "stone"
 }
 
+# Block-Rotation: gespeichert wird (lokale Oberseite, lokale Vorderseite) als
+# Welt-Flächen-Index. Dadurch kann ein Block nicht nur zur Seite/Decke kippen,
+# sondern auf Ober-/Unterseiten auch nach Spieler-Blickrichtung gedreht werden.
+# 0 = unten, 1 = oben, 2 = +Z, 3 = -Z, 4 = +X, 5 = -X.
+DEFAULT_BLOCK_ROTATION = 1
+ROTATABLE_BLOCK_TYPES = set(BLOCK_FACE_TILES.keys())
+
 atlas_texture = load_texture(texture)
 if atlas_texture is not None:
     try:
@@ -121,6 +128,7 @@ face_to_chunk = {}
 face_block_types = {}
 
 block_types = {}
+block_rotations = {}
 
 top_columns = {}
 top_cells = {}
@@ -140,6 +148,9 @@ _FACE_NORMALS_TUPLES = {
     3: (0, 0, -1), 4: (1, 0, 0), 5: (-1, 0, 0),
 }
 _FACE_NORMALS = {k: Vec3(*v) for k, v in _FACE_NORMALS_TUPLES.items()}
+_FACE_INDEX_BY_NORMAL = {v: k for k, v in _FACE_NORMALS_TUPLES.items()}
+_ROTATION_AXES_CACHE = {}
+_ROTATION_FACE_MAP_CACHE = {}
 
 _FACE_OFFSETS = [Vec3(*cf[:3]) for cf in cube_faces]
 _OPPOSITE_FACE = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4}
@@ -217,6 +228,186 @@ def _block_tile_for_face(block_type, face_idx):
     return tile
 
 
+def _normalize_face_index(face_idx, default=DEFAULT_BLOCK_ROTATION):
+    try:
+        idx = int(face_idx)
+    except:
+        idx = int(default)
+    if idx in _FACE_NORMALS_TUPLES:
+        return idx
+    return int(default)
+
+
+def _vec_neg(v):
+    return (-v[0], -v[1], -v[2])
+
+
+def _vec_dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def _vec_cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _default_forward_face_for_up(up_face_idx):
+    up_face_idx = _normalize_face_index(up_face_idx)
+    up_axis = _FACE_NORMALS_TUPLES[up_face_idx]
+
+    # Bei normaler Ober-/Unterseite zeigt die lokale Vorderseite standardmäßig +Z.
+    # Bei seitlich gekippten Blöcken zeigt sie nach oben, damit Wand-Texturen
+    # nicht liegen, sondern aufrecht wirken.
+    candidates = [1, 2, 4, 3, 5, 0]
+    if up_face_idx in (0, 1):
+        candidates = [2, 4, 3, 5]
+
+    for candidate in candidates:
+        candidate_axis = _FACE_NORMALS_TUPLES[candidate]
+        if _vec_dot(up_axis, candidate_axis) == 0:
+            return candidate
+    return 2
+
+
+def _normalize_block_rotation(rotation):
+    # Altes Format: nur ein Face-Index. Neues Format: (up_face, forward_face).
+    if isinstance(rotation, (tuple, list)) and len(rotation) >= 2:
+        up_face = _normalize_face_index(rotation[0])
+        forward_face = _normalize_face_index(rotation[1], _default_forward_face_for_up(up_face))
+    else:
+        up_face = _normalize_face_index(rotation)
+        forward_face = _default_forward_face_for_up(up_face)
+
+    up_axis = _FACE_NORMALS_TUPLES[up_face]
+    forward_axis = _FACE_NORMALS_TUPLES[forward_face]
+    if _vec_dot(up_axis, forward_axis) != 0:
+        forward_face = _default_forward_face_for_up(up_face)
+
+    return (up_face, forward_face)
+
+
+def _rotation_axes(rotation):
+    rotation = _normalize_block_rotation(rotation)
+    cached = _ROTATION_AXES_CACHE.get(rotation)
+    if cached is not None:
+        return cached
+
+    up_face, forward_face = rotation
+    up_axis = _FACE_NORMALS_TUPLES[up_face]
+    preferred_forward = _FACE_NORMALS_TUPLES[forward_face]
+
+    right_axis = _vec_cross(up_axis, preferred_forward)
+    if right_axis == (0, 0, 0):
+        preferred_forward = _FACE_NORMALS_TUPLES[_default_forward_face_for_up(up_face)]
+        right_axis = _vec_cross(up_axis, preferred_forward)
+    forward_axis = _vec_cross(right_axis, up_axis)
+
+    cached = (right_axis, up_axis, forward_axis)
+    _ROTATION_AXES_CACHE[rotation] = cached
+    return cached
+
+
+def _transform_local_axis_to_world(axis, rotation):
+    right_axis, up_axis, forward_axis = _rotation_axes(rotation)
+    return (
+        axis[0] * right_axis[0] + axis[1] * up_axis[0] + axis[2] * forward_axis[0],
+        axis[0] * right_axis[1] + axis[1] * up_axis[1] + axis[2] * forward_axis[1],
+        axis[0] * right_axis[2] + axis[1] * up_axis[2] + axis[2] * forward_axis[2],
+    )
+
+
+def _rotation_world_to_local_face_map(rotation):
+    rotation = _normalize_block_rotation(rotation)
+    cached = _ROTATION_FACE_MAP_CACHE.get(rotation)
+    if cached is not None:
+        return cached
+
+    right_axis, up_axis, forward_axis = _rotation_axes(rotation)
+    local_to_world = {
+        0: _FACE_INDEX_BY_NORMAL[_vec_neg(up_axis)],
+        1: _FACE_INDEX_BY_NORMAL[up_axis],
+        2: _FACE_INDEX_BY_NORMAL[forward_axis],
+        3: _FACE_INDEX_BY_NORMAL[_vec_neg(forward_axis)],
+        4: _FACE_INDEX_BY_NORMAL[right_axis],
+        5: _FACE_INDEX_BY_NORMAL[_vec_neg(right_axis)],
+    }
+    world_to_local = {world_face: local_face for local_face, world_face in local_to_world.items()}
+    _ROTATION_FACE_MAP_CACHE[rotation] = world_to_local
+    return world_to_local
+
+
+def _local_face_for_world_face(world_face_idx, rotation):
+    world_face_idx = int(world_face_idx)
+    return _rotation_world_to_local_face_map(rotation).get(world_face_idx, world_face_idx)
+
+
+def _block_rotation_from_base(base, block_type=None):
+    base = _vkey(base)
+    if block_type is None:
+        block_type = block_types.get(base, DEFAULT_BLOCK_TYPE)
+    btype = _normalize_block_type(block_type)
+    raw_rotation = _normalize_block_rotation(block_rotations.get(base, DEFAULT_BLOCK_ROTATION))
+
+    # Natürliche Blöcke bleiben default, weil sie mit DEFAULT_BLOCK_ROTATION
+    # gespeichert werden. Manuell platzierte Blöcke drehen ihre Face-Texturen
+    # wirklich mit der gespeicherten Richtung mit.
+    if btype not in ROTATABLE_BLOCK_TYPES:
+        return _normalize_block_rotation(DEFAULT_BLOCK_ROTATION)
+    return raw_rotation
+
+
+def _block_rotation_from_face_key(face_key):
+    base = _cube_base_from_face(face_key[0], face_key[1])
+    btype = block_types.get(base, DEFAULT_BLOCK_TYPE)
+    return _block_rotation_from_base(base, btype)
+
+
+def _block_tile_for_world_face(block_type, rotation, world_face_idx):
+    local_face_idx = _local_face_for_world_face(world_face_idx, rotation)
+    return _block_tile_for_face(block_type, local_face_idx)
+
+
+def _axis_coord_for_uv(vertex, axis):
+    x, y, z = vertex
+    if axis[0] != 0:
+        return float(x) * axis[0]
+    if axis[1] != 0:
+        return (float(y) / max(BLOCK_HEIGHT, 1e-8)) * axis[1]
+    if axis[2] != 0:
+        return float(z) * axis[2]
+    return 0.0
+
+
+_LOCAL_FACE_UV_AXES = {
+    0: ((1, 0, 0), (0, 0, 1)),
+    1: ((1, 0, 0), (0, 0, -1)),
+    2: ((1, 0, 0), (0, 1, 0)),
+    3: ((-1, 0, 0), (0, 1, 0)),
+    4: ((0, 0, -1), (0, 1, 0)),
+    5: ((0, 0, 1), (0, 1, 0)),
+}
+
+
+def _rotated_uvs(world_face_idx, rotation, quad_verts):
+    local_face_idx = _local_face_for_world_face(world_face_idx, rotation)
+    local_u_axis, local_v_axis = _LOCAL_FACE_UV_AXES.get(
+        local_face_idx,
+        ((1, 0, 0), (0, 1, 0)),
+    )
+
+    world_u_axis = _transform_local_axis_to_world(local_u_axis, rotation)
+    world_v_axis = _transform_local_axis_to_world(local_v_axis, rotation)
+
+    raw_us = [_axis_coord_for_uv(v, world_u_axis) for v in quad_verts]
+    raw_vs = [_axis_coord_for_uv(v, world_v_axis) for v in quad_verts]
+    min_u = min(raw_us)
+    min_v = min(raw_vs)
+    return [(raw_us[i] - min_u, raw_vs[i] - min_v) for i in range(len(quad_verts))]
+
+
 def _atlas_rect(tile_x, tile_y):
     tx = int(clamp(tile_x, 0, ATLAS_TILES_X - 1))
     ty = int(clamp(tile_y, 0, ATLAS_TILES_Y - 1))
@@ -291,9 +482,20 @@ def _safe_clear_destroy(obj):
         pass
 
 
-def _set_block_type(base, block_type):
+def _set_block_rotation(base, rotation):
+    block_rotations[_vkey(base)] = _normalize_block_rotation(rotation)
+
+
+def _set_block_type(base, block_type, rotation=None):
+    base = _vkey(base)
     btype = _normalize_block_type(block_type)
     block_types[base] = btype
+
+    if rotation is not None:
+        _set_block_rotation(base, rotation)
+    elif base not in block_rotations:
+        block_rotations[base] = DEFAULT_BLOCK_ROTATION
+
     for i in range(len(_FACE_OFFSETS)):
         fp = _face_pos_from_base(base, i)
         fk = _face_key(fp, i)
@@ -400,6 +602,7 @@ def _rebuild_chunk_mesh(chunk_coord):
             pos_key, fidx = fk
             base = _cube_base_from_face(pos_key, fidx)
             btype = _block_type_from_face_key(fk)
+            brot = _block_rotation_from_base(base, btype)
 
             lx = int(round(base[0]))
             ly = int(round(base[1] / BLOCK_HEIGHT))
@@ -414,7 +617,7 @@ def _rebuild_chunk_mesh(chunk_coord):
 
             if slice_idx not in slices:
                 slices[slice_idx] = {}
-            slices[slice_idx][(u, v)] = btype
+            slices[slice_idx][(u, v)] = (btype, brot)
 
         for slice_idx, grid in slices.items():
             if not grid: continue
@@ -429,17 +632,18 @@ def _rebuild_chunk_mesh(chunk_coord):
                     if (u, v) in visited or (u, v) not in grid:
                         continue
 
-                    btype = grid[(u, v)]
+                    cell_data = grid[(u, v)]
+                    btype, brot = cell_data
 
                     w = 1
-                    while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == btype:
+                    while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == cell_data:
                         w += 1
 
                     h = 1
                     can_expand = True
                     while (v + h) <= max_v and can_expand:
                         for du in range(w):
-                            if (u + du, v + h) in visited or grid.get((u + du, v + h)) != btype:
+                            if (u + du, v + h) in visited or grid.get((u + du, v + h)) != cell_data:
                                 can_expand = False
                                 break
                         if can_expand:
@@ -485,11 +689,11 @@ def _rebuild_chunk_mesh(chunk_coord):
                     else:
                         quad_verts = [(X0, Y0, Z0), (X0, Y0, Z1), (X0, Y1, Z1), (X0, Y1, Z0)]
 
-                    tile = _block_tile_for_face(btype, int(d))
+                    tile = _block_tile_for_world_face(btype, brot, int(d))
                     u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
                     rect = (u0, v0, u1, v1)
 
-                    quad_uvs = _fast_uvs(d, W_ext, H_ext, D_ext)
+                    quad_uvs = _rotated_uvs(d, brot, quad_verts)
                     n = _FACE_NORMALS_TUPLES.get(d, (0, 1, 0))
 
                     idx0 = len(vertices)
@@ -1289,18 +1493,20 @@ def _add_face(face_key, chunk_coord, affected, block_type=None):
     face_block_types[face_key] = block_type
     if base not in block_types:
         block_types[base] = block_type
+    if base not in block_rotations:
+        block_rotations[base] = DEFAULT_BLOCK_ROTATION
     chunk_face_sets[chunk_coord].add(face_key)
     _register_top_face(face_key[0], face_key[1])
     affected.add(chunk_coord)
     return True
 
 
-def place_block_programmatically(base_tuple, btype, affected):
+def place_block_programmatically(base_tuple, btype, affected, rotation=DEFAULT_BLOCK_ROTATION):
     base_key = _vkey(base_tuple)
     if base_key in block_types:
         return
 
-    _set_block_type(base_key, btype)
+    _set_block_type(base_key, btype, rotation=rotation)
     cube_base = Vec3(*base_key)
 
     for i, off in enumerate(_FACE_OFFSETS):
@@ -1344,6 +1550,7 @@ def load_chunks():
     face_to_chunk.clear()
     face_block_types.clear()
     block_types.clear()
+    block_rotations.clear()
     top_columns.clear()
     top_cells.clear()
     block_face_counts.clear()
@@ -1358,6 +1565,7 @@ def load_chunks():
             positions = chunk_data[0]
             indices = chunk_data[1]
             block_type_data = chunk_data[2] if len(chunk_data) > 2 else None
+            block_rotation_data = chunk_data[3] if len(chunk_data) > 3 else None
 
             for i, face_pos in enumerate(positions):
                 if i >= len(indices):
@@ -1366,6 +1574,10 @@ def load_chunks():
                 btype = DEFAULT_BLOCK_TYPE
                 if block_type_data is not None and i < len(block_type_data):
                     btype = _normalize_block_type(block_type_data[i])
+
+                brot = DEFAULT_BLOCK_ROTATION
+                if block_rotation_data is not None and i < len(block_rotation_data):
+                    brot = _normalize_block_rotation(block_rotation_data[i])
 
                 key = _face_key(face_pos, fidx)
                 if key in world_faces:
@@ -1378,6 +1590,9 @@ def load_chunks():
                 base = _cube_base_from_face(key[0], key[1])
                 if base not in block_types:
                     block_types[base] = btype
+                    block_rotations[base] = brot
+                elif base not in block_rotations:
+                    block_rotations[base] = DEFAULT_BLOCK_ROTATION
                 chunk_face_sets[chunk_coord].add(key)
                 _register_top_face(key[0], key[1])
     except Exception as e:
@@ -1528,7 +1743,40 @@ def get_target_face(max_distance: int = 12):
     return None, None, None
 
 
-def build():
+def _horizontal_face_from_direction(direction):
+    dx = float(direction.x)
+    dz = float(direction.z)
+
+    if abs(dx) < 1e-6 and abs(dz) < 1e-6:
+        yaw = math.radians(float(player.rotation_y))
+        dx = math.sin(yaw)
+        dz = math.cos(yaw)
+
+    if abs(dx) >= abs(dz):
+        return 4 if dx >= 0 else 5
+    return 2 if dz >= 0 else 3
+
+
+def _placement_rotation_from_face(placement_face_idx):
+    up_face = _normalize_face_index(placement_face_idx)
+
+    # Auf Boden/Decke wird zusätzlich nach der Blickrichtung gedreht.
+    # An Wänden kippt der Block zur Wand und bleibt mit seiner Vorderseite aufrecht.
+    if up_face in (0, 1):
+        forward = Vec3(camera.forward)
+        forward.y = 0
+        if forward.length_squared() <= 1e-8:
+            forward = Vec3(player.forward)
+            forward.y = 0
+        forward_face = _horizontal_face_from_direction(forward)
+    else:
+        forward_face = 1
+
+    return _normalize_block_rotation((up_face, forward_face))
+
+
+def build(placement_rotation=DEFAULT_BLOCK_ROTATION):
+    placement_rotation = _normalize_block_rotation(placement_rotation)
     cube_base = Vec3(c.position) + Vec3(0, -1.5, 0)
     base_key = _vkey(cube_base)
     cube_base = Vec3(*base_key)
@@ -1543,7 +1791,7 @@ def build():
 
     affected = set()
 
-    _set_block_type(base_key, selected_block_type)
+    _set_block_type(base_key, selected_block_type, rotation=placement_rotation)
 
     below = _vkey((base_key[0], base_key[1] - BLOCK_HEIGHT, base_key[2]))
     if below in block_types and _normalize_block_type(block_types[below]) == "grass":
@@ -1591,6 +1839,7 @@ def mine(face_pos=None, face_idx=None):
             _add_face(opp, tgt, affected)
 
     block_types.pop(cube_base, None)
+    block_rotations.pop(cube_base, None)
 
     below = _vkey((cube_base[0], cube_base[1] - BLOCK_HEIGHT, cube_base[2]))
     if below in block_types and _normalize_block_type(block_types[below]) == "grass":
@@ -1668,7 +1917,7 @@ def input(key):
         if face_pos:
             cube_base = Vec3(face_pos) - _FACE_OFFSETS[face_idx] + normal
             c.position = cube_base + Vec3(0, 1.5, 0)
-            build()
+            build(_placement_rotation_from_face(face_idx))
 
     if key in ("left mouse down", "4"):
         face_pos, _, face_idx = get_target_face()
