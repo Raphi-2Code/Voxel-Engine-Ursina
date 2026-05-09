@@ -16,10 +16,11 @@ player.cursor.color = color.white
 player.cursor.rotation = (0, 0, 0)
 player.cursor.texture = "cursor"
 player.cursor.scale = 0.04
-player.speed = 5
+PLAYER_MOVE_SPEED = 5
+player.speed = 0  # Bewegung läuft unten über unsere eigene Sweep-Physik.
 player.height = PLAYER_HEIGHT
 player.camera_pivot.y = 1.28
-camera.fov = 120 #USE 90 IF YOU WANT
+camera.fov = 120
 player.collider = None
 
 Sky(texture="clouds.png")
@@ -148,6 +149,7 @@ MAX_FALL_SPEED = 0.42 * 1000
 JUMP_SPEED = 1.7 * 3.92
 
 MIN_HEADROOM_TO_JUMP = 1.0
+JUMP_START_HEADROOM = 0.05
 
 PLAYER_STAND_HEIGHT = 0.0
 GROUND_STICK = 0.08
@@ -189,7 +191,6 @@ is_grounded = False
 prev_horizontal_x = None
 prev_horizontal_z = None
 
-key_hold_frames = {"w": 0, "a": 0, "s": 0, "d": 0}
 
 
 def _vkey(v):
@@ -511,7 +512,9 @@ def _rebuild_chunk_mesh(chunk_coord):
     tex = atlas_texture if atlas_texture is not None else texture
 
     if old is None:
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
+        ent = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
+        ent.collider = None  # Chunks bleiben absichtlich ohne Ursina-Collider.
+        combined_terrains[chunk_coord] = ent
         return
 
     try:
@@ -523,7 +526,9 @@ def _rebuild_chunk_mesh(chunk_coord):
         combined_terrains[chunk_coord] = old
     except:
         _safe_clear_destroy(old)
-        combined_terrains[chunk_coord] = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
+        ent = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
+        ent.collider = None  # Chunks bleiben absichtlich ohne Ursina-Collider.
+        combined_terrains[chunk_coord] = ent
 
 
 def _refresh_chunks(affected_chunks):
@@ -722,6 +727,32 @@ def _iter_solid_blocks(min_x, max_x, min_z, max_z, y_min, y_max):
             yield bx0, bx1, bz0, bz1
 
 
+def _iter_solid_block_bounds(min_x, max_x, min_z, max_z, min_y, max_y):
+    """Wie _iter_solid_blocks, aber mit Y-Grenzen.
+
+    Wird für vertikale Sweep-Kollision benutzt. Dadurch entscheidet beim Springen
+    nicht mehr die breite Top-Probe, sondern der echte Player-AABB.
+    """
+    for col, ys in _iter_candidate_columns(min_x, max_x, min_z, max_z):
+        x, z = col
+        bx0 = x - BLOCK_HALF_EXTENT
+        bx1 = x + BLOCK_HALF_EXTENT
+        bz0 = z - BLOCK_HALF_EXTENT
+        bz1 = z + BLOCK_HALF_EXTENT
+
+        if max_x <= bx0 or min_x >= bx1:
+            continue
+        if max_z <= bz0 or min_z >= bz1:
+            continue
+
+        for y_top in ys:
+            by1 = y_top
+            by0 = y_top - BLOCK_HEIGHT
+            if max_y <= by0 or min_y >= by1:
+                continue
+            yield bx0, bx1, by0, by1, bz0, bz1
+
+
 def _aabb_hit_info(min_x, max_x, min_y, max_y, min_z, max_z):
     hit_chunks = set()
     top_off = float(_FACE_OFFSETS[1].y)
@@ -768,7 +799,10 @@ def _jump_blocked_by_ceiling():
     px = float(player.x)
     pz = float(player.z)
     r = PLAYER_COLLISION_RADIUS
-    return _aabb_hits_any_block(px - r, px + r, head_y, head_y + MIN_HEADROOM_TO_JUMP, pz - r, pz + r)
+
+    # Nur direkt blockierte Kopffreiheit verhindert den Start des Sprungs.
+    # Eine Decke weiter oben wird während des Sprungs per _sweep_y sauber getroffen.
+    return _aabb_hits_any_block(px - r, px + r, head_y, head_y + JUMP_START_HEADROOM, pz - r, pz + r)
 
 
 def _sweep_x(start_x, target_x, z, y_min, y_max):
@@ -866,6 +900,61 @@ def _resolve_horizontal_penetration(px, pz, y_min, y_max):
     return px, pz
 
 
+def _sweep_y(start_y, target_y, px, pz):
+    """Vertikale Sweep-Kollision für Springen und Fallen.
+
+    Vorher hat die breite Top-Probe den Sprung gestoppt. An Blockkanten konnte sie
+    seitliche/benachbarte Blöcke als Decke werten. Diese Funktion benutzt stattdessen
+    den echten Player-AABB und gibt optional "ceiling" oder "ground" zurück.
+    """
+    dy = target_y - start_y
+    if abs(dy) < 1e-8:
+        return target_y, None
+
+    r = PLAYER_COLLISION_RADIUS
+    min_x = float(px) - r
+    max_x = float(px) + r
+    min_z = float(pz) - r
+    max_z = float(pz) + r
+
+    if dy > 0:
+        head_start = start_y + PLAYER_HEIGHT - PLAYER_COLLISION_HEAD_CLEARANCE
+        head_target = target_y + PLAYER_HEIGHT - PLAYER_COLLISION_HEAD_CLEARANCE
+        sweep_min_y = start_y + PLAYER_COLLISION_FOOT_CLEARANCE
+        sweep_max_y = head_target
+
+        limit = target_y
+        hit = False
+        for _, _, by0, _, _, _ in _iter_solid_block_bounds(min_x, max_x, min_z, max_z, sweep_min_y, sweep_max_y):
+            if head_start <= by0 + SWEEP_TOL and head_target >= by0:
+                candidate = by0 - PLAYER_HEIGHT + PLAYER_COLLISION_HEAD_CLEARANCE - WALL_EPS
+                if candidate < limit:
+                    limit = candidate
+                    hit = True
+
+        if hit:
+            return max(start_y, limit), "ceiling"
+        return target_y, None
+
+    foot_start = start_y - PLAYER_STAND_HEIGHT
+    foot_target = target_y - PLAYER_STAND_HEIGHT
+    sweep_min_y = target_y + PLAYER_COLLISION_FOOT_CLEARANCE
+    sweep_max_y = start_y + PLAYER_HEIGHT - PLAYER_COLLISION_HEAD_CLEARANCE
+
+    limit = target_y
+    hit = False
+    for _, _, _, by1, _, _ in _iter_solid_block_bounds(min_x, max_x, min_z, max_z, sweep_min_y, sweep_max_y):
+        if foot_start >= by1 - SWEEP_TOL and foot_target <= by1:
+            candidate = by1 + PLAYER_STAND_HEIGHT
+            if candidate > limit:
+                limit = candidate
+                hit = True
+
+    if hit:
+        return min(start_y, limit), "ground"
+    return target_y, None
+
+
 def _round_probe(value, step=PROBE_GRID_STEP):
     return round(float(value) / step) * step
 
@@ -879,7 +968,7 @@ def _snap_probe_yaw(yaw):
 
 
 def _player_facing_vectors():
-    yaw = math.radians(_snap_probe_yaw(player.rotation_y))
+    yaw = math.radians(float(player.rotation_y))
     forward = Vec3(math.sin(yaw), 0, math.cos(yaw))
     right = Vec3(forward.z, 0, -forward.x)
     return forward, right
@@ -918,10 +1007,11 @@ def _ensure_player_probes():
         e = Entity(
             model="cube",
             color=PROBE_COLOR,
-            collider="box",
             scale=half * 2,
         )
-        e.collision = False
+        # Probes sind nur Debug-/Abtast-Entities. Sie dürfen keinen Collider haben,
+        # sonst können Ursina-Raycasts sie als Hindernis treffen.
+        e.collider = None
         player_probe_entities[name] = e
         player_probe_hits[name] = False
 
@@ -946,8 +1036,10 @@ def _sample_player_probes_at(base_position, do_assign=True):
     hits = {}
     sampled = []
 
-    snapped_base = _round_probe_vec(base_position)
-    base_yaw = _snap_probe_yaw(player.rotation_y)
+    # Für Kollisionsabfragen die echte Player-Position verwenden, nicht auf das Blockraster runden.
+    # Gerundete Probes können sonst an Kanten falsche Treffer liefern.
+    snapped_base = Vec3(float(base_position.x), float(base_position.y), float(base_position.z))
+    base_yaw = float(player.rotation_y)
 
     for name, local_off, local_half, yaw_off in _player_probe_layout():
         raw_center = _world_pos_from_local(snapped_base, local_off)
@@ -977,7 +1069,6 @@ def _sample_player_probes_at(base_position, do_assign=True):
             else:
                 probe.rotation = Vec3(0, base_yaw + yaw_off, 0)
 
-            probe.collision = bool(hit)
             probe.color = PROBE_HIT_COLOR if hit else PROBE_COLOR
 
     player_probe_hits.clear()
@@ -986,31 +1077,62 @@ def _sample_player_probes_at(base_position, do_assign=True):
 
 
 def _apply_player_probe_horizontal():
+    """Bewegt den Spieler horizontal per Sweep-Kollision.
+
+    Der FirstPersonController darf nicht mehr selbst laufen, weil er sonst erst in den
+    Block hineinbewegt und unsere Korrektur dagegen ankämpfen muss. Stattdessen wird
+    die gewünschte WASD-Bewegung hier berechnet und vor dem Setzen der Position gegen
+    die Block-AABBs gesweept.
+    """
     global prev_horizontal_x, prev_horizontal_z
 
     cur_x = float(player.x)
     cur_z = float(player.z)
 
-    if prev_horizontal_x is None or prev_horizontal_z is None:
+    if not getattr(player, "enabled", True):
         prev_horizontal_x = cur_x
         prev_horizontal_z = cur_z
         _sample_player_probes_at(Vec3(cur_x, float(player.y), cur_z), do_assign=True)
         return
 
+    forward = Vec3(player.forward)
+    forward.y = 0
+    if forward.length_squared() > 1e-8:
+        forward = forward.normalized()
+
+    right = Vec3(player.right)
+    right.y = 0
+    if right.length_squared() > 1e-8:
+        right = right.normalized()
+
+    move_dir = (
+        forward * (held_keys["w"] - held_keys["s"])
+        + right * (held_keys["d"] - held_keys["a"])
+    )
+
+    if move_dir.length_squared() > 1e-8:
+        move_dir = move_dir.normalized()
+        target_x = cur_x + move_dir.x * PLAYER_MOVE_SPEED * time.dt
+        target_z = cur_z + move_dir.z * PLAYER_MOVE_SPEED * time.dt
+    else:
+        target_x = cur_x
+        target_z = cur_z
+
     y_min, y_max = _player_body_y_span()
 
-    dx = cur_x - prev_horizontal_x
-    dz = cur_z - prev_horizontal_z
+    dx = target_x - cur_x
+    dz = target_z - cur_z
     if abs(dx) >= abs(dz):
-        res_x = _sweep_x(prev_horizontal_x, cur_x, prev_horizontal_z, y_min, y_max)
-        res_z = _sweep_z(prev_horizontal_z, cur_z, res_x, y_min, y_max)
+        res_x = _sweep_x(cur_x, target_x, cur_z, y_min, y_max)
+        res_z = _sweep_z(cur_z, target_z, res_x, y_min, y_max)
     else:
-        res_z = _sweep_z(prev_horizontal_z, cur_z, prev_horizontal_x, y_min, y_max)
-        res_x = _sweep_x(prev_horizontal_x, cur_x, res_z, y_min, y_max)
+        res_z = _sweep_z(cur_z, target_z, cur_x, y_min, y_max)
+        res_x = _sweep_x(cur_x, target_x, res_z, y_min, y_max)
 
+    # Normale Überlappungsauflösung, falls z.B. ein Block direkt am Spieler
+    # gebaut wurde oder Rundungsfehler eine minimale Penetration erzeugen.
     res_x, res_z = _resolve_horizontal_penetration(res_x, res_z, y_min, y_max)
 
-    _sample_player_probes_at(Vec3(res_x, float(player.y), res_z), do_assign=False)
     player.x = res_x
     player.z = res_z
     prev_horizontal_x = float(player.x)
@@ -1070,7 +1192,8 @@ def _apply_vector_gravity():
     for _ in range(steps):
         px = float(player.x)
         pz = float(player.z)
-        current_foot = float(player.y) - PLAYER_STAND_HEIGHT
+        current_y = float(player.y)
+        current_foot = current_y - PLAYER_STAND_HEIGHT
 
         support_scan_up = MAX_STEP_UP
         if vertical_velocity < 0:
@@ -1080,16 +1203,17 @@ def _apply_vector_gravity():
         if support_y is None and len(block_face_counts) > 0:
             support_y = _find_support_y_fallback(px, pz, current_foot, support_scan_up)
 
-        if support_y is not None and current_foot < support_y:
-            if not _can_stand_at(px, pz, support_y):
-                continue
-            player.y = support_y + PLAYER_STAND_HEIGHT
-            vertical_velocity = 0.0
-            is_grounded = True
-            _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
-            continue
-
+        # Boden-Snap/Step-Up nur beim Fallen oder Stehen. Beim Springen darf kein
+        # oberer Block den Spieler per Support-Suche nach oben "festziehen".
         if support_y is not None and vertical_velocity <= 0:
+            if current_foot < support_y:
+                if _can_stand_at(px, pz, support_y):
+                    player.y = support_y + PLAYER_STAND_HEIGHT
+                    vertical_velocity = 0.0
+                    is_grounded = True
+                    _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
+                    continue
+
             d = current_foot - support_y
             if 0 <= d <= GROUND_STICK:
                 player.y = support_y + PLAYER_STAND_HEIGHT
@@ -1100,39 +1224,19 @@ def _apply_vector_gravity():
 
         vertical_velocity = max(vertical_velocity - GRAVITY_ACCEL * time.dt, -MAX_FALL_SPEED / 60)
         next_y = float(player.y) + vertical_velocity * dt
-        next_foot = next_y - PLAYER_STAND_HEIGHT
 
-        probe_hits = _sample_player_probes_at(Vec3(px, next_y, pz), do_assign=False)
+        swept_y, vertical_hit = _sweep_y(float(player.y), next_y, px, pz)
+        player.y = swept_y
 
-        if vertical_velocity > 0 and probe_hits.get("top", False):
-            player.y = float(player.y)
+        if vertical_hit == "ceiling":
             vertical_velocity = 0.0
             is_grounded = False
-            _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
-            continue
-
-        if support_y is not None and vertical_velocity <= 0 and next_foot <= support_y:
-            player.y = support_y + PLAYER_STAND_HEIGHT
+        elif vertical_hit == "ground":
             vertical_velocity = 0.0
             is_grounded = True
-            _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
-            continue
+        else:
+            is_grounded = False
 
-        if vertical_velocity <= 0 and probe_hits.get("bottom", False):
-            snap = _find_support_y(px, pz, next_foot, support_scan_up)
-            if snap is None:
-                snap = support_y
-            if snap is not None and next_foot <= snap + 0.25:
-                if not _can_stand_at(px, pz, snap):
-                    continue
-                player.y = snap + PLAYER_STAND_HEIGHT
-                vertical_velocity = 0.0
-                is_grounded = True
-                _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
-                continue
-
-        player.y = next_y
-        is_grounded = False
         _sample_player_probes_at(Vec3(px, float(player.y), pz), do_assign=True)
 
 
@@ -1507,86 +1611,26 @@ def _frame_position_for_target(face_pos, face_idx):
 
 
 def update():
-    global key_hold_frames
-
-    for k in ("w", "a", "s", "d"):
-        if held_keys[k]:
-            key_hold_frames[k] += 1
-            if 1 < key_hold_frames[k] <= 7:
-                input(k)
-        else:
-            key_hold_frames[k] = 0
-
     if chunk_update_queue:
         chunk_to_update = chunk_update_queue.pop(0)
         _rebuild_chunk_mesh(chunk_to_update)
 
-    _apply_player_probe_horizontal()
-    _apply_vector_gravity()
-    _snap_player_y_to_grid()
 
-    face_pos, _, face_idx = get_target_face()
-    if face_pos:
-        c2.position = _frame_position_for_target(face_pos, face_idx)
-    else:
-        c2.position = floor(player.position + (0, 10000, 0))
+class PlayerPhysicsController(Entity):
+    def update(self):
+        _apply_player_probe_horizontal()
+        _apply_vector_gravity()
+        _snap_player_y_to_grid()
+
+        face_pos, _, face_idx = get_target_face()
+        if face_pos:
+            c2.position = _frame_position_for_target(face_pos, face_idx)
+        else:
+            c2.position = floor(player.position + (0, 10000, 0))
 
 
 def input(key):
     global mode, vertical_velocity, is_grounded, selected_block_type
-    global prev_horizontal_x, prev_horizontal_z
-
-    y_min = float(player.y) + PLAYER_COLLISION_FOOT_CLEARANCE
-    y_max = float(player.y) + float(player.height) - PLAYER_COLLISION_HEAD_CLEARANCE
-
-    px = float(player.x)
-    pz = float(player.z)
-    r = PLAYER_COLLISION_RADIUS
-    dist = PROBE_FRONT_OFFSET
-
-    def check_dir(d_vec):
-        d = Vec3(float(d_vec.x), 0.0, float(d_vec.z))
-        if d.length_squared() < 1e-8: return False
-        d = d.normalized()
-        cx = px + d.x * dist
-        cz = pz + d.z * dist
-        return _aabb_hits_any_block(cx - r, cx + r, y_min, y_max, cz - r, cz + r)
-
-    fwd = Vec3(player.forward);
-    fwd.y = 0
-    bck = Vec3(player.back);
-    bck.y = 0
-    rgt = Vec3(player.right);
-    rgt.y = 0
-    lft = Vec3(player.left);
-    lft.y = 0
-
-    hit_front = check_dir(fwd)
-    hit_back = check_dir(bck)
-    hit_right = check_dir(rgt)
-    hit_left = check_dir(lft)
-
-    is_stuck = hit_front or hit_back or hit_right or hit_left
-
-    if is_stuck and key in ("w", "a", "s", "d"):
-        move_dir = Vec3(0, 0, 0)
-        if hit_front: move_dir += bck
-        if hit_back:  move_dir += fwd
-        if hit_right: move_dir += lft
-        if hit_left:  move_dir += rgt
-
-        if move_dir.length_squared() > 1e-8:
-            move_dir = move_dir.normalized()
-            nx = px + move_dir.x * player.speed * time.dt
-            nz = pz + move_dir.z * player.speed * time.dt
-
-            player.x = nx
-            player.z = nz
-            prev_horizontal_x = nx
-            prev_horizontal_z = nz
-
-            _sample_player_probes_at(Vec3(nx, float(player.y), nz), do_assign=True)
-            return True
 
     if key == "o":
         mode = 1 - mode
@@ -1646,5 +1690,7 @@ def input(key):
     if key == "z":
         player.cursor.disable()
 
+
+player_physics_controller = PlayerPhysicsController()
 
 app.run()
