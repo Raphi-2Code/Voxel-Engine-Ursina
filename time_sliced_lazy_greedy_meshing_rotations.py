@@ -8,6 +8,13 @@ import math
 import numpy as np
 from bisect import bisect_left, bisect_right
 from time import perf_counter
+from functools import lru_cache
+from pathlib import Path
+
+try:
+    from ursina.shaders import unlit_shader as cow_unlit_shader
+except Exception:
+    cow_unlit_shader = None
 
 app = Ursina()
 
@@ -3149,8 +3156,958 @@ def _frame_position_for_target(face_pos, face_idx):
     return Vec3(hit_base[0], hit_base[1] + 1.5, hit_base[2])
 
 
+
+# -----------------------------------------------------------------------------
+# Kühe / einfache Mob-Logik
+# -----------------------------------------------------------------------------
+try:
+    GAME_ROOT = Path(__file__).resolve().parent
+except Exception:
+    GAME_ROOT = Path(".").resolve()
+
+COW_OBJ_PATH = GAME_ROOT / "cow.obj"
+COW_TEXTURE_CANDIDATES = (
+    GAME_ROOT / "cow.png",
+    GAME_ROOT / "cow(1).png",
+    GAME_ROOT / "assets" / "cow.png",
+    GAME_ROOT / "assets" / "cow(1).png",
+)
+COW_LEG_NAMES = {"front_right_leg", "front_left_leg", "back_right_leg", "back_left_leg"}
+COW_COUNT = 12
+COW_SCALE = 0.82
+COW_WALK_SPEED = 1.35
+COW_WANDER_RADIUS = 9.0
+COW_MIN_SPAWN_DISTANCE = 2.25
+COW_MAX_STEP_HEIGHT = 1.05
+COW_SPAWN_SEARCH_RADIUS = 18.0
+# Start-Spawns werden nicht mehr nach Spieler-Nähe sortiert. Stattdessen werden
+# die Kühe mit Ankerpunkten über die ganze geladene Welt verteilt. Bei einer
+# 8x8-Chunk-Welt ergibt das standardmäßig 4x3 Anker = 12 weit gestreute Kühe.
+COW_DISTRIBUTED_SPAWN = True
+COW_SPAWN_GRID_COLUMNS = 4
+COW_SPAWN_GRID_ROWS = 3
+COW_WORLD_MIN_SPAWN_DISTANCE = max(8.0, float(chunk_size) * 0.75)
+COW_UNIQUE_SPAWN_CHUNKS_FIRST = True
+COW_PREFERRED_SURFACE_TYPES = {"grass", "dirt"}
+# Fallback: Wenn es wegen Bäumen/Höhlen/Schichtung zu wenige Gras-/Dirt-Spalten gibt,
+# werden trotzdem echte Oberflächen benutzt. So bleibt das Ziel wirklich 12 Kühe.
+COW_WALKABLE_BLOCK_TYPES = set(BLOCK_FACE_TILES.keys()) - {"water"}
+COW_FALLBACK_SURFACE_TYPES = COW_WALKABLE_BLOCK_TYPES
+
+# Kleine eigene Physik für Kühe. Sie benutzen absichtlich keine Ursina-Collider,
+# sondern dieselben gespeicherten Top-Column-Daten wie der Spieler. Dadurch reagieren
+# sie sofort darauf, wenn Blöcke unter ihnen abgebaut werden.
+COW_GROUND_STICK = 0.04
+COW_GRAVITY_ACCEL = 18.0
+COW_MAX_FALL_SPEED = 24.0
+COW_VOID_DESPAWN_Y = -64.0
+COW_POPULATION_CHECK_INTERVAL = 1.5
+COW_SPAWN_REPORT = True
+COW_VERBOSE_SPAWN_REPORT = True
+cow_entities = []
+_cow_texture_cache = None
+_cow_assets_warning_printed = False
+_cow_next_population_check = 0.0
+
+
+def _cow_hash01(*values):
+    total = seed * 0.173
+    for i, value in enumerate(values):
+        total += float(value) * (12.9898 + i * 19.19)
+    val = abs(math.sin(total) * 43758.5453)
+    return val - math.floor(val)
+
+
+def _find_cow_texture_path():
+    for candidate in COW_TEXTURE_CANDIDATES:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            pass
+    return None
+
+
+@lru_cache(maxsize=1)
+def _load_cow_obj_groups():
+    positions = []
+    texcoords = []
+    groups = {}
+    current_group = None
+
+    for raw_line in COW_OBJ_PATH.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        parts = line.split()
+        if parts[0] == "v":
+            # X wird gespiegelt, damit die Textur/Ausrichtung wie beim Testskript passt.
+            positions.append((-float(parts[1]), float(parts[2]), float(parts[3])))
+        elif parts[0] == "vt":
+            texcoords.append((float(parts[1]), float(parts[2])))
+        elif parts[0] == "g":
+            current_group = parts[1]
+            groups[current_group] = {"faces": [], "positions": positions, "texcoords": texcoords}
+        elif parts[0] == "f" and current_group is not None:
+            face = []
+            for token in parts[1:]:
+                ref = token.split("/")
+                vertex_index = int(ref[0]) - 1
+                uv_index = int(ref[1]) - 1 if len(ref) > 1 and ref[1] else None
+                face.append((vertex_index, uv_index))
+            groups[current_group]["faces"].append(face)
+
+    return groups
+
+
+def _cow_group_bounds(group):
+    positions = group["positions"]
+    used_indices = {vertex_index for face in group["faces"] for vertex_index, _ in face}
+    xs, ys, zs = zip(*(positions[index] for index in used_indices))
+    return min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)
+
+
+def _make_cow_group_mesh(group, pivot):
+    positions = group["positions"]
+    texcoords = group["texcoords"]
+    vertices = []
+    uvs = []
+
+    for face in group["faces"]:
+        if len(face) == 3:
+            triangles = face
+        elif len(face) == 4:
+            triangles = (face[0], face[1], face[2], face[2], face[3], face[0])
+        else:
+            triangles = tuple(
+                face[index]
+                for offset in range(1, len(face) - 1)
+                for index in (offset, offset + 1, 0)
+            )
+
+        for vertex_index, uv_index in triangles:
+            x, y, z = positions[vertex_index]
+            vertices.append((x - pivot.x, y - pivot.y, z - pivot.z))
+            uvs.append(texcoords[uv_index] if uv_index is not None else (0.0, 0.0))
+
+    # Absichtlich pro Kuh/Part ein eigenes Mesh erzeugen. Die vorherige Version hat
+    # Mesh-Objekte gecacht; falls Ursina/Panda diese Mesh-Instanz nicht sauber klont,
+    # sieht man dann praktisch nur eine Kuh. Eigene Meshes sind hier sicherer.
+    return Mesh(vertices=vertices, uvs=uvs, static=True)
+
+
+def _get_cow_texture():
+    global _cow_texture_cache
+    if _cow_texture_cache is not None:
+        return _cow_texture_cache
+
+    texture_path = _find_cow_texture_path()
+    if texture_path is None:
+        return None
+
+    try:
+        _cow_texture_cache = load_texture(texture_path.name, folder=texture_path.parent, filtering="nearest")
+    except TypeError:
+        _cow_texture_cache = load_texture(str(texture_path), filtering="nearest")
+    except Exception:
+        _cow_texture_cache = load_texture(str(texture_path))
+
+    return _cow_texture_cache
+
+
+def _create_cow_entity():
+    global _cow_assets_warning_printed
+
+    if not COW_OBJ_PATH.exists():
+        if not _cow_assets_warning_printed:
+            print(f"Kuh-Asset fehlt: {COW_OBJ_PATH}")
+            _cow_assets_warning_printed = True
+        return None
+
+    cow_texture = _get_cow_texture()
+    if cow_texture is None:
+        if not _cow_assets_warning_printed:
+            print("Kuh-Textur fehlt: Lege cow.png oder cow(1).png neben die Python-Datei.")
+            _cow_assets_warning_printed = True
+        return None
+
+    root = Entity(position=(0, 0, 0), rotation_y=0, scale=COW_SCALE)
+    root.name = f"cow_{len(cow_entities) + 1:02d}"
+    root.collider = None
+    root.parts = {}
+    root.visual = Entity(parent=root, position=(0, 0, 0), rotation=(0, 0, 0), scale=1)
+    root.visual.collider = None
+
+    groups = _load_cow_obj_groups()
+    for group_name, group in groups.items():
+        pivot = Vec3(0, 0, 0)
+        if group_name in COW_LEG_NAMES:
+            min_x, max_x, _min_y, max_y, min_z, max_z = _cow_group_bounds(group)
+            pivot = Vec3((min_x + max_x) * 0.5, max_y, (min_z + max_z) * 0.5)
+
+        part = Entity(
+            parent=root.visual,
+            model=_make_cow_group_mesh(group, pivot),
+            texture=cow_texture,
+            position=pivot,
+            color=color.white,
+        )
+        part.collider = None
+        if cow_unlit_shader:
+            part.shader = cow_unlit_shader
+        root.parts[group_name] = part
+
+    root._cow_walk_phase = _cow_hash01(len(cow_entities), 17) * math.tau
+    root._cow_seed = 1000.0 + len(cow_entities) * 37.0 + _cow_hash01(len(cow_entities), 99) * 100.0
+    root._cow_speed = COW_WALK_SPEED * (0.85 + _cow_hash01(root._cow_seed, 2) * 0.35)
+    root._cow_target = None
+    root._cow_retarget_in = 0.2 + _cow_hash01(root._cow_seed, 3) * 1.4
+    root._cow_home_x = 0.0
+    root._cow_home_z = 0.0
+    root._cow_vertical_velocity = 0.0
+    root._cow_grounded = True
+    return root
+
+
+def _cow_surface_y(x, z):
+    gx = round(float(x))
+    gz = round(float(z))
+    ys = top_columns.get((gx, gz))
+    if ys:
+        return float(ys[-1])
+
+    # Fallback für den Fall, dass gespeicherte Spalten als float vorliegen.
+    best = None
+    for (cx, cz), col_ys in list(top_columns.items()):
+        if not col_ys:
+            continue
+        if round(float(cx)) != gx or round(float(cz)) != gz:
+            continue
+        y = float(col_ys[-1])
+        if best is None or y > best:
+            best = y
+    return best
+
+
+def _cow_find_support_y(px, pz, foot_y, max_up=0.0):
+    """Findet die höchste Block-Oberkante unter der Kuh-Mitte."""
+    gx = round(float(px))
+    gz = round(float(pz))
+    ys = top_columns.get((gx, gz))
+    if not ys:
+        return None
+
+    ceiling = float(foot_y) + max(0.0, float(max_up))
+    idx = bisect_right(ys, ceiling)
+    if idx == 0:
+        return None
+    return float(ys[idx - 1])
+
+
+def _apply_cow_gravity(cow, dt):
+    """Gibt True zurück, wenn die Kuh gerade auf einem Block steht."""
+    if cow is None:
+        return False
+
+    dt = max(0.0, min(float(dt), 0.05))
+    if dt <= 0.0:
+        return bool(getattr(cow, "_cow_grounded", False))
+
+    current_y = float(cow.y)
+    vertical_velocity = float(getattr(cow, "_cow_vertical_velocity", 0.0))
+
+    # Steht die Kuh auf/knapp über der Mittelspalte, am Boden festkleben.
+    support_y = _cow_find_support_y(cow.x, cow.z, current_y, COW_GROUND_STICK)
+    if support_y is not None and vertical_velocity <= 0.0 and current_y <= float(support_y) + COW_GROUND_STICK:
+        cow.y = float(support_y)
+        cow._cow_vertical_velocity = 0.0
+        cow._cow_grounded = True
+        return True
+
+    vertical_velocity = max(vertical_velocity - COW_GRAVITY_ACCEL * dt, -COW_MAX_FALL_SPEED)
+    next_y = current_y + vertical_velocity * dt
+
+    # Landung: Wenn der Fall-Schritt eine Oberkante unter der Kuh kreuzt, genau dort stoppen.
+    landing_support_y = _cow_find_support_y(cow.x, cow.z, current_y, 0.0)
+    if landing_support_y is not None and next_y <= float(landing_support_y) <= current_y + COW_GROUND_STICK:
+        cow.y = float(landing_support_y)
+        cow._cow_vertical_velocity = 0.0
+        cow._cow_grounded = True
+        return True
+
+    cow.y = float(next_y)
+    cow._cow_vertical_velocity = vertical_velocity
+    cow._cow_grounded = False
+
+    if float(cow.y) < COW_VOID_DESPAWN_Y:
+        try:
+            cow_entities.remove(cow)
+        except ValueError:
+            pass
+        try:
+            destroy(cow)
+        except Exception:
+            cow.enabled = False
+
+    return False
+
+
+def _cow_surface_block_base(x, z):
+    y = _cow_surface_y(x, z)
+    if y is None:
+        return None
+    gx = round(float(x))
+    gz = round(float(z))
+    return _vkey((gx, y - float(_FACE_OFFSETS[1].y), gz))
+
+
+def _cow_surface_block_type(x, z):
+    base = _cow_surface_block_base(x, z)
+    if base is None:
+        return None
+    btype = block_types.get(base)
+    if btype is None:
+        try:
+            btype = _infer_block_type_for_hidden_block(base)
+        except Exception:
+            btype = DEFAULT_BLOCK_TYPE
+    return _normalize_block_type(btype)
+
+
+def _cow_surface_entries():
+    """Höchste aktuell bekannte Oberfläche je X/Z-Spalte."""
+    seen = set()
+    top_off = float(_FACE_OFFSETS[1].y)
+
+    for col, ys in list(top_columns.items()):
+        if not ys:
+            continue
+
+        x, z = col
+        gx = round(float(x))
+        gz = round(float(z))
+        key = (gx, gz)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        y_top = float(ys[-1])
+        base = _vkey((gx, y_top - top_off, gz))
+        btype = block_types.get(base)
+        if btype is None:
+            try:
+                btype = _infer_block_type_for_hidden_block(base)
+            except Exception:
+                btype = DEFAULT_BLOCK_TYPE
+        yield (float(gx), float(y_top), float(gz), _normalize_block_type(btype))
+
+
+def _cow_spawn_candidates(allow_fallback=False, radius_limit=None):
+    """Mögliche Spawnpunkte, bevorzugt Gras/Dirt, optional mit Solid-Fallback."""
+    px = float(player.x)
+    pz = float(player.z)
+    radius2 = None if radius_limit is None else float(radius_limit) * float(radius_limit)
+    valid_types = COW_FALLBACK_SURFACE_TYPES if allow_fallback else COW_PREFERRED_SURFACE_TYPES
+
+    candidates = []
+    for x, y, z, btype in _cow_surface_entries():
+        if btype not in valid_types:
+            continue
+        if radius2 is not None:
+            dx = x - px
+            dz = z - pz
+            if dx * dx + dz * dz > radius2:
+                continue
+        candidates.append((x, y, z, btype))
+    return candidates
+
+
+def _spawn_cow_on_surface(x, z, rotation_y=None, allow_fallback=False):
+    y = _cow_surface_y(x, z)
+    if y is None:
+        return None
+
+    btype = _cow_surface_block_type(x, z)
+    valid_types = COW_FALLBACK_SURFACE_TYPES if allow_fallback else COW_PREFERRED_SURFACE_TYPES
+    if btype not in valid_types:
+        return None
+
+    cow = _create_cow_entity()
+    if cow is None:
+        return None
+
+    cow.position = Vec3(float(x), float(y), float(z))
+    cow.rotation_y = float(rotation_y) if rotation_y is not None else _cow_hash01(x, z, 5) * 360.0
+    cow._cow_home_x = float(x)
+    cow._cow_home_z = float(z)
+    cow._cow_vertical_velocity = 0.0
+    cow._cow_grounded = True
+    cow_entities.append(cow)
+    _choose_cow_target(cow, force_wait=True)
+    return cow
+
+
+def _live_cows():
+    return [cow for cow in cow_entities if cow is not None and getattr(cow, "enabled", True)]
+
+
+def _live_cow_count():
+    return len(_live_cows())
+
+
+def _cow_spawn_score(candidate):
+    x, y, z, btype = candidate
+    px = float(player.x)
+    pz = float(player.z)
+    dx = x - px
+    dz = z - pz
+    dist = math.sqrt(dx * dx + dz * dz)
+
+    # Nicht direkt auf dem Spieler kleben, sondern als kleine Herde in Sichtweite.
+    ideal = 5.0
+    ring_score = abs(dist - ideal) * 5.0
+    near_score = dist * 0.5
+    type_penalty = 0.0 if btype in COW_PREFERRED_SURFACE_TYPES else 35.0
+    return type_penalty + ring_score + near_score + _cow_hash01(x, y, z, 11) * 3.0
+
+
+def _cow_has_spawn_spacing(x, z, min_distance):
+    if min_distance <= 0.0:
+        return True
+    min_dist2 = float(min_distance) * float(min_distance)
+    for other in _live_cows():
+        dx = float(other.x) - float(x)
+        dz = float(other.z) - float(z)
+        if dx * dx + dz * dz < min_dist2:
+            return False
+    return True
+
+
+def _cow_live_columns():
+    return {(round(float(cow.x)), round(float(cow.z))) for cow in _live_cows()}
+
+
+def _cow_candidate_chunk_key(x, z):
+    return (
+        math.floor(float(x) / max(1.0, float(chunk_size))),
+        math.floor(float(z) / max(1.0, float(chunk_size))),
+    )
+
+
+def _cow_live_chunks():
+    return {_cow_candidate_chunk_key(cow.x, cow.z) for cow in _live_cows()}
+
+
+def _cow_world_bounds_from_candidates(candidates):
+    if not candidates:
+        return None
+    xs = [float(candidate[0]) for candidate in candidates]
+    zs = [float(candidate[2]) for candidate in candidates]
+    return min(xs), max(xs), min(zs), max(zs)
+
+
+def _cow_spawn_anchors(candidates, wanted_count):
+    """Gleichmäßig verteilte Zielpunkte über die komplette geladene Welt.
+
+    Diese Anker sind nur Zielpunkte. Gespawnt wird danach auf dem nächsten
+    tatsächlich gültigen Gras-/Dirt-Block. Dadurch landen die Kühe nicht alle
+    im Startchunk, sondern ungefähr über die ganze Map verteilt.
+    """
+    wanted_count = max(0, int(wanted_count))
+    bounds = _cow_world_bounds_from_candidates(candidates)
+    if wanted_count <= 0 or bounds is None:
+        return []
+
+    min_x, max_x, min_z, max_z = bounds
+    width = max(1.0, float(max_x) - float(min_x))
+    depth = max(1.0, float(max_z) - float(min_z))
+
+    cols = max(1, int(COW_SPAWN_GRID_COLUMNS))
+    rows = max(1, int(COW_SPAWN_GRID_ROWS))
+
+    # Falls COW_COUNT später erhöht wird, automatisch zusätzliche Zellen ergänzen.
+    while cols * rows < wanted_count:
+        if width / cols >= depth / rows:
+            cols += 1
+        else:
+            rows += 1
+
+    anchors = []
+    for rz in range(rows):
+        for cx in range(cols):
+            ax = min_x + (cx + 0.5) * width / cols
+            az = min_z + (rz + 0.5) * depth / rows
+            anchors.append((ax, az))
+
+    # Deterministische, aber nicht zeilenweise Reihenfolge. Das verhindert, dass
+    # bei wenigen Kandidaten zuerst nur die linke/obere Weltseite gefüllt wird.
+    anchors.sort(key=lambda anchor: _cow_hash01(anchor[0], anchor[1], 71))
+    return anchors
+
+
+def _cow_spawn_spacing_ok(x, z, selected_positions, min_distance):
+    if min_distance <= 0.0:
+        return True
+
+    if not _cow_has_spawn_spacing(x, z, min_distance):
+        return False
+
+    min_dist2 = float(min_distance) * float(min_distance)
+    for other_x, other_z in selected_positions:
+        dx = float(other_x) - float(x)
+        dz = float(other_z) - float(z)
+        if dx * dx + dz * dz < min_dist2:
+            return False
+    return True
+
+
+def _cow_anchor_candidate_score(candidate, anchor, anchor_index):
+    x, y, z, btype = candidate
+    ax, az = anchor
+    dx = float(x) - float(ax)
+    dz = float(z) - float(az)
+
+    # Fallback-Oberflächen werden nur genommen, wenn es zu wenige Gras-/Dirt-
+    # Punkte gibt. Innerhalb eines Ankers gewinnt der räumlich passendste Block.
+    type_penalty = 0.0 if btype in COW_PREFERRED_SURFACE_TYPES else float(chunk_size * chunk_size) * 4.0
+    tiny_random_tiebreak = _cow_hash01(x, y, z, anchor_index, 83) * 0.25
+    return dx * dx + dz * dz + type_penalty + tiny_random_tiebreak
+
+
+def _select_distributed_cow_spawn_records(candidates, wanted_count, allow_reuse_chunks=False):
+    """Wählt Spawnpunkte verteilt über Welt-Anker statt nach Spieler-Nähe.
+
+    Rückgabe: [(candidate, spawn_x, spawn_z), ...]
+    """
+    wanted_count = max(0, int(wanted_count))
+    if wanted_count <= 0 or not candidates:
+        return []
+
+    anchors = _cow_spawn_anchors(candidates, wanted_count)
+    if not anchors:
+        return []
+
+    selected_records = []
+    selected_positions = []
+    used_columns = _cow_live_columns()
+    used_chunks = _cow_live_chunks()
+
+    # Erst streng: unterschiedliche Chunks und großer Abstand. Danach immer weiter
+    # lockern, damit bei kleinen/zerstörten Welten trotzdem bis 12 aufgefüllt wird.
+    unique_first = bool(COW_UNIQUE_SPAWN_CHUNKS_FIRST) and not allow_reuse_chunks
+    passes = [
+        (unique_first, COW_WORLD_MIN_SPAWN_DISTANCE),
+        (unique_first, max(COW_MIN_SPAWN_DISTANCE, COW_WORLD_MIN_SPAWN_DISTANCE * 0.55)),
+        (False, COW_WORLD_MIN_SPAWN_DISTANCE),
+        (False, COW_MIN_SPAWN_DISTANCE),
+        (False, 0.0),
+    ]
+
+    for enforce_unique_chunk, min_distance in passes:
+        if len(selected_records) >= wanted_count:
+            break
+
+        for anchor_index, anchor in enumerate(anchors):
+            if len(selected_records) >= wanted_count:
+                break
+
+            best = None
+            best_score = None
+
+            for candidate in candidates:
+                x, y, z, _btype = candidate
+                col_key = (round(float(x)), round(float(z)))
+                if col_key in used_columns:
+                    continue
+
+                chunk_key = _cow_candidate_chunk_key(x, z)
+                if enforce_unique_chunk and chunk_key in used_chunks:
+                    continue
+
+                spawn_index = _live_cow_count() + len(selected_records)
+                sx, sz = _jittered_spawn_position(x, y, z, spawn_index)
+                if not _cow_spawn_spacing_ok(sx, sz, selected_positions, min_distance):
+                    continue
+
+                score = _cow_anchor_candidate_score(candidate, anchor, anchor_index)
+                if best is None or score < best_score:
+                    best = (candidate, sx, sz, chunk_key, col_key)
+                    best_score = score
+
+            if best is None:
+                continue
+
+            candidate, sx, sz, chunk_key, col_key = best
+            selected_records.append((candidate, sx, sz))
+            selected_positions.append((sx, sz))
+            used_columns.add(col_key)
+            used_chunks.add(chunk_key)
+
+    return selected_records
+
+
+def _spawn_cow_from_candidate_record(candidate, sx=None, sz=None, allow_fallback=False):
+    x, y, z, _btype = candidate
+    spawn_index = _live_cow_count()
+    if sx is None or sz is None:
+        sx, sz = _jittered_spawn_position(x, y, z, spawn_index)
+
+    cow = _spawn_cow_on_surface(
+        x,
+        z,
+        rotation_y=_cow_hash01(x, y, z, 33 + spawn_index) * 360.0,
+        allow_fallback=allow_fallback,
+    )
+    if cow is None:
+        return None
+
+    cow.x = float(sx)
+    cow.z = float(sz)
+    support_y = _cow_surface_y(cow.x, cow.z)
+    cow.y = float(support_y) if support_y is not None else float(y)
+    cow._cow_home_x = float(cow.x)
+    cow._cow_home_z = float(cow.z)
+    cow._cow_vertical_velocity = 0.0
+    cow._cow_grounded = True
+    return cow
+
+
+def _spawn_from_distributed_candidates(candidates, allow_fallback=False, allow_reuse_chunks=False):
+    if _live_cow_count() >= COW_COUNT:
+        return 0
+
+    wanted = COW_COUNT - _live_cow_count()
+    records = _select_distributed_cow_spawn_records(
+        candidates,
+        wanted,
+        allow_reuse_chunks=allow_reuse_chunks,
+    )
+
+    spawned = 0
+    for candidate, sx, sz in records:
+        if _live_cow_count() >= COW_COUNT:
+            break
+        cow = _spawn_cow_from_candidate_record(candidate, sx=sx, sz=sz, allow_fallback=allow_fallback)
+        if cow is not None:
+            spawned += 1
+
+    return spawned
+
+
+def _jittered_spawn_position(x, y, z, spawn_index):
+    # Kleine, aber sichere Verschiebung. Durch <0.32 bleibt round(x/z) in derselben
+    # Stützspalte; die Kuh steht also wirklich auf dem ausgewählten Block.
+    ox = (_cow_hash01(x, y, z, 31 + spawn_index) - 0.5) * 0.62
+    oz = (_cow_hash01(x, y, z, 32 + spawn_index) - 0.5) * 0.62
+    return float(x) + ox, float(z) + oz
+
+
+def _spawn_from_ordered_candidates(ordered, allow_fallback, allow_reuse_columns=False):
+    spawned = 0
+    used_columns = _cow_live_columns()
+
+    for spacing in (COW_MIN_SPAWN_DISTANCE, max(1.25, COW_MIN_SPAWN_DISTANCE * 0.55), 0.0):
+        if _live_cow_count() >= COW_COUNT:
+            break
+
+        for x, y, z, btype in ordered:
+            if _live_cow_count() >= COW_COUNT:
+                break
+
+            col_key = (round(float(x)), round(float(z)))
+            if not allow_reuse_columns and col_key in used_columns:
+                continue
+
+            spawn_index = _live_cow_count()
+            sx, sz = _jittered_spawn_position(x, y, z, spawn_index)
+            if not _cow_has_spawn_spacing(sx, sz, spacing):
+                continue
+
+            cow = _spawn_cow_on_surface(x, z, rotation_y=_cow_hash01(x, y, z, 33 + spawn_index) * 360.0, allow_fallback=allow_fallback)
+            if cow is None:
+                continue
+
+            cow.x = sx
+            cow.z = sz
+            support_y = _cow_surface_y(cow.x, cow.z)
+            cow.y = float(support_y) if support_y is not None else float(y)
+            cow._cow_home_x = float(cow.x)
+            cow._cow_home_z = float(cow.z)
+            cow._cow_vertical_velocity = 0.0
+            cow._cow_grounded = True
+            used_columns.add(col_key)
+            spawned += 1
+
+    return spawned
+
+
+def _spawn_cows_until_target():
+    if _live_cow_count() >= COW_COUNT:
+        return 0
+
+    if not COW_OBJ_PATH.exists() or _find_cow_texture_path() is None:
+        _create_cow_entity()
+        return 0
+
+    spawned = 0
+
+    if COW_DISTRIBUTED_SPAWN:
+        # 1) Wichtigster Fix: Nicht mehr zuerst im Radius um den Spieler füllen.
+        # Stattdessen werden Spawn-Anker über die komplette geladene Welt gelegt.
+        candidates = _cow_spawn_candidates(allow_fallback=False, radius_limit=None)
+        spawned += _spawn_from_distributed_candidates(candidates, allow_fallback=False, allow_reuse_chunks=False)
+
+        # 2) Wenn Gras/Dirt nicht reicht, auch andere feste Oberflächen verwenden,
+        # aber weiter über die ganze Welt verteilt.
+        if _live_cow_count() < COW_COUNT:
+            candidates = _cow_spawn_candidates(allow_fallback=True, radius_limit=None)
+            spawned += _spawn_from_distributed_candidates(candidates, allow_fallback=True, allow_reuse_chunks=False)
+
+        # 3) Notfall: Bei extrem kleinen/zerstörten Welten Chunks wiederverwenden.
+        if _live_cow_count() < COW_COUNT:
+            candidates = _cow_spawn_candidates(allow_fallback=True, radius_limit=None)
+            spawned += _spawn_from_distributed_candidates(candidates, allow_fallback=True, allow_reuse_chunks=True)
+
+        return spawned
+
+    # Alter Nahbereichs-Spawn als abschaltbarer Fallback.
+    for radius in (COW_SPAWN_SEARCH_RADIUS, COW_SPAWN_SEARCH_RADIUS * 2.0, None):
+        if _live_cow_count() >= COW_COUNT:
+            break
+        candidates = _cow_spawn_candidates(allow_fallback=False, radius_limit=radius)
+        ordered = sorted(candidates, key=_cow_spawn_score)
+        spawned += _spawn_from_ordered_candidates(ordered, allow_fallback=False, allow_reuse_columns=False)
+
+    for radius in (COW_SPAWN_SEARCH_RADIUS, COW_SPAWN_SEARCH_RADIUS * 2.0, None):
+        if _live_cow_count() >= COW_COUNT:
+            break
+        candidates = _cow_spawn_candidates(allow_fallback=True, radius_limit=radius)
+        ordered = sorted(candidates, key=_cow_spawn_score)
+        spawned += _spawn_from_ordered_candidates(ordered, allow_fallback=True, allow_reuse_columns=False)
+
+    if _live_cow_count() < COW_COUNT:
+        candidates = _cow_spawn_candidates(allow_fallback=True, radius_limit=None)
+        ordered = sorted(candidates, key=_cow_spawn_score)
+        spawned += _spawn_from_ordered_candidates(ordered, allow_fallback=True, allow_reuse_columns=True)
+
+    return spawned
+
+
+def _cow_debug_positions():
+    live = _live_cows()
+    print(f"Kuh-Debug: {len(live)}/{COW_COUNT} live")
+    for i, cow in enumerate(live, start=1):
+        chunk_key = _cow_candidate_chunk_key(cow.x, cow.z)
+        print(
+            f"  #{i:02d} {getattr(cow, 'name', 'cow')} @ "
+            f"x={float(cow.x):.2f}, y={float(cow.y):.2f}, z={float(cow.z):.2f}, "
+            f"chunk={chunk_key}"
+        )
+
+
+def _ensure_cow_population(force=False):
+    global _cow_next_population_check
+
+    if _live_cow_count() >= COW_COUNT:
+        return
+
+    now = perf_counter()
+    if not force and now < _cow_next_population_check:
+        return
+
+    _cow_next_population_check = now + COW_POPULATION_CHECK_INTERVAL
+    before = _live_cow_count()
+    spawned = _spawn_cows_until_target()
+    after = _live_cow_count()
+
+    if COW_SPAWN_REPORT and (force or after != before):
+        preferred_count = len(_cow_spawn_candidates(allow_fallback=False, radius_limit=None))
+        fallback_count = len(_cow_spawn_candidates(allow_fallback=True, radius_limit=None))
+        if fallback_count == 0:
+            print(f"Kühe gespawnt: {after}/{COW_COUNT} (keine passenden Oberflächen gefunden)")
+        elif not COW_OBJ_PATH.exists() or _find_cow_texture_path() is None:
+            print(f"Kühe gespawnt: {after}/{COW_COUNT} (cow.obj/cow.png fehlt)")
+        else:
+            print(f"Kühe gespawnt: {after}/{COW_COUNT} (neu: {spawned}, Gras/Dirt-Kandidaten: {preferred_count}, Fallback-Kandidaten: {fallback_count})")
+        if COW_VERBOSE_SPAWN_REPORT:
+            _cow_debug_positions()
+
+
+def _spawn_initial_cows():
+    _ensure_cow_population(force=True)
+
+
+def _choose_cow_target(cow, force_wait=False):
+    if cow is None:
+        return
+
+    if force_wait:
+        cow._cow_target = None
+        cow._cow_retarget_in = 0.4 + _cow_hash01(cow._cow_seed, perf_counter()) * 1.2
+        return
+
+    origin_x = float(getattr(cow, "_cow_home_x", cow.x))
+    origin_z = float(getattr(cow, "_cow_home_z", cow.z))
+    salt = perf_counter() + float(getattr(cow, "_cow_seed", 0.0))
+
+    for attempt in range(18):
+        angle = _cow_hash01(salt, attempt, 1) * math.tau
+        dist = 2.0 + _cow_hash01(salt, attempt, 2) * COW_WANDER_RADIUS
+        tx = origin_x + math.sin(angle) * dist
+        tz = origin_z + math.cos(angle) * dist
+        gx = round(tx)
+        gz = round(tz)
+        y = _cow_surface_y(gx, gz)
+        if y is None:
+            continue
+        if _cow_surface_block_type(gx, gz) not in COW_WALKABLE_BLOCK_TYPES:
+            continue
+        if abs(float(y) - float(cow.y)) > COW_MAX_STEP_HEIGHT:
+            continue
+
+        ox = (_cow_hash01(salt, attempt, 3) - 0.5) * 0.55
+        oz = (_cow_hash01(salt, attempt, 4) - 0.5) * 0.55
+        cow._cow_target = Vec3(float(gx) + ox, float(y), float(gz) + oz)
+        cow._cow_retarget_in = 0.0
+        return
+
+    cow._cow_target = None
+    cow._cow_retarget_in = 0.8 + _cow_hash01(salt, 19) * 1.2
+
+
+def _lerp_angle_degrees(a, b, t):
+    diff = (float(b) - float(a) + 180.0) % 360.0 - 180.0
+    return float(a) + diff * max(0.0, min(1.0, float(t)))
+
+
+def _animate_cow(cow, moving):
+    dt = max(0.0, min(float(time.dt), 0.05))
+    if moving:
+        cow._cow_walk_phase += dt * 9.5
+        swing = math.sin(cow._cow_walk_phase) * 31.0
+        bob = abs(math.sin(cow._cow_walk_phase * 2.0)) * 0.035
+    else:
+        swing = 0.0
+        bob = 0.0
+
+    try:
+        cow.visual.y = cow.visual.y + (bob - cow.visual.y) * min(1.0, dt * 10.0)
+    except Exception:
+        pass
+
+    leg_targets = {
+        "front_right_leg": -swing,
+        "back_left_leg": -swing,
+        "front_left_leg": swing,
+        "back_right_leg": swing,
+    }
+    for name, target_rot in leg_targets.items():
+        part = cow.parts.get(name)
+        if part is None:
+            continue
+        part.rotation_x = part.rotation_x + (target_rot - part.rotation_x) * min(1.0, dt * 12.0)
+
+
+def _update_cows():
+    _ensure_cow_population()
+
+    if not cow_entities:
+        return
+
+    dt = max(0.0, min(float(time.dt), 0.05))
+    if dt <= 0.0:
+        return
+
+    for cow in list(cow_entities):
+        if cow is None or not getattr(cow, "enabled", True):
+            continue
+
+        # Erst die Vertikalphysik: Dadurch fällt die Kuh auch dann, wenn sie gerade
+        # wartet oder kein gültiges Wanderziel hat.
+        grounded = _apply_cow_gravity(cow, dt)
+        if not grounded:
+            cow._cow_target = None
+            cow._cow_retarget_in = max(float(getattr(cow, "_cow_retarget_in", 0.0)), 0.25)
+            _animate_cow(cow, False)
+            continue
+
+        target = getattr(cow, "_cow_target", None)
+        if getattr(cow, "_cow_retarget_in", 0.0) > 0.0:
+            cow._cow_retarget_in -= dt
+            _animate_cow(cow, False)
+            if cow._cow_retarget_in <= 0.0:
+                _choose_cow_target(cow)
+            continue
+
+        if target is None:
+            _choose_cow_target(cow)
+            _animate_cow(cow, False)
+            continue
+
+        dx = float(target.x) - float(cow.x)
+        dz = float(target.z) - float(cow.z)
+        dist2 = dx * dx + dz * dz
+        if dist2 < 0.04:
+            _choose_cow_target(cow, force_wait=True)
+            _animate_cow(cow, False)
+            continue
+
+        dist = math.sqrt(dist2)
+        nx = float(cow.x) + (dx / dist) * min(dist, float(cow._cow_speed) * dt)
+        nz = float(cow.z) + (dz / dist) * min(dist, float(cow._cow_speed) * dt)
+        ny = _cow_surface_y(nx, nz)
+        if ny is None or _cow_surface_block_type(nx, nz) not in COW_WALKABLE_BLOCK_TYPES:
+            _choose_cow_target(cow, force_wait=True)
+            _animate_cow(cow, False)
+            continue
+        if abs(float(ny) - float(cow.y)) > COW_MAX_STEP_HEIGHT:
+            _choose_cow_target(cow, force_wait=True)
+            _animate_cow(cow, False)
+            continue
+
+        cow.x = nx
+        cow.y = float(ny)
+        cow.z = nz
+        cow._cow_vertical_velocity = 0.0
+        cow._cow_grounded = True
+        desired_yaw = math.degrees(math.atan2(dx, dz))
+        cow.rotation_y = _lerp_angle_degrees(cow.rotation_y, desired_yaw, dt * 7.5)
+        _animate_cow(cow, True)
+
+
+def spawn_cow_from_crosshair():
+    face_pos, _normal, face_idx = get_target_face()
+    if face_pos is not None:
+        base = _cube_base_from_face(face_pos, face_idx)
+        x = float(base[0])
+        z = float(base[2])
+    else:
+        forward = Vec3(camera.forward)
+        forward.y = 0
+        if forward.length_squared() > 1e-8:
+            forward = forward.normalized()
+        else:
+            forward = Vec3(player.forward)
+            forward.y = 0
+            if forward.length_squared() > 1e-8:
+                forward = forward.normalized()
+        x = float(player.x) + float(forward.x) * 3.0
+        z = float(player.z) + float(forward.z) * 3.0
+
+    cow = _spawn_cow_on_surface(round(x), round(z), rotation_y=float(player.rotation_y), allow_fallback=True)
+    if cow is not None:
+        cow._cow_home_x = float(cow.x)
+        cow._cow_home_z = float(cow.z)
+        print(f"Kuh manuell gespawnt: {cow.name} @ x={float(cow.x):.2f}, y={float(cow.y):.2f}, z={float(cow.z):.2f}")
+    return cow
+
+
+_spawn_initial_cows()
+
 def update():
     _process_lazy_chunk_rebuilds()
+    _update_cows()
 
 
 class PlayerPhysicsController(Entity):
@@ -3223,6 +4180,13 @@ def input(key):
         window.exit_button.disable()
         window.cog_menu.disable()
         c2.disable()
+
+    if key == "k":
+        spawn_cow_from_crosshair()
+
+    if key == "p":
+        _ensure_cow_population(force=True)
+        _cow_debug_positions()
 
     if key == "z":
         player.cursor.disable()
