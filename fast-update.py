@@ -1,10 +1,13 @@
 from ursina import *
-from panda3d.core import LVecBase3f, Vec4, Vec3, Vec2
+from panda3d.core import LVecBase3f, Vec4, Vec3, Vec2, PNMImage, Filename
+from panda3d.core import Texture as PandaTexture, SamplerState as PandaSamplerState
+from ursina.texture import Texture as UrsinaTexture
 from ursina.prefabs.first_person_controller import *
 from itertools import *
 import math
 import numpy as np
 from bisect import bisect_left, bisect_right
+from time import perf_counter
 
 app = Ursina()
 
@@ -137,6 +140,26 @@ top_cells = {}
 block_face_counts = {}
 
 chunk_update_queue = []
+
+# Time-sliced Lazy Greedy-Meshing:
+# Beim Bauen/Abbauen wird sofort nur ein billiges Dirty-Preview-Mesh angezeigt.
+# Das teure Cross-Type-Greedy-Mesh mit gebackener Chunk-Textur wird danach
+# NICHT nur verzögert, sondern wirklich über mehrere Frames aufgebaut.
+chunk_update_set = set()
+chunk_update_due = {}
+chunk_rebuild_versions = {}
+active_chunk_rebuild_job = None
+dirty_chunk_previews = {}
+
+# Nur sehr kleine Sammelzeit für mehrere schnelle Änderungen. Das ist KEINE
+# "Bauzeit". Die eigentliche Arbeit wird durch LAZY_REBUILD_FRAME_BUDGET verteilt.
+LAZY_REBUILD_SETTLE_DELAY = 0.03
+
+# Maximal erlaubte Mesh-/Bake-Arbeit pro Frame in Sekunden.
+# 0.0025-0.0045 ist meistens angenehm. Höher = schneller fertig, aber mehr Frame-Spikes.
+LAZY_REBUILD_FRAME_BUDGET = 0.0035
+DIRTY_PREVIEW_ENABLED = True
+_REBUILD_JOB_DEADLINE = 0.0
 
 # NEU: Speichert die Höhen der ursprünglichen natürlichen Oberfläche
 surface_heights = {}
@@ -451,8 +474,17 @@ def _ensure_chunk(chunk_coord):
 
 
 def _reset_chunk_storage():
+    global active_chunk_rebuild_job
     for obj in combined_terrains.values():
         _safe_clear_destroy(obj)
+    for obj in dirty_chunk_previews.values():
+        _safe_clear_destroy(obj)
+    dirty_chunk_previews.clear()
+    chunk_update_queue.clear()
+    chunk_update_set.clear()
+    chunk_update_due.clear()
+    chunk_rebuild_versions.clear()
+    active_chunk_rebuild_job = None
     all_chunks.clear()
     chunk_face_sets.clear()
     combined_terrains.clear()
@@ -578,21 +610,589 @@ def _fast_uvs(face_idx, w, h, d_ext):
     return [(0, 0), (1, 0), (1, 1), (0, 1)]
 
 
+# Cross-type Greedy-Meshing:
+# Ein einziges großes Quad kann mit normalen Atlas-UVs immer nur eine Textur
+# wiederholen. Damit ein Quad trotzdem mehrere Blocktypen/Rotationen enthalten
+# kann, wird pro Chunk eine kleine gebackene Textur erzeugt. In diese Textur
+# werden die Atlas-Kacheln der einzelnen Blockzellen hineinkopiert; das Mesh
+# benutzt danach normale UVs auf diese Chunk-Textur und braucht keinen Lookup-
+# Shader mehr.
+_BAKED_SOURCE_ATLAS_IMAGE = None
+_BAKED_SOURCE_TILE_SIZE = None
+_BAKED_TEXTURE_PADDING = 1
+_BAKED_TEXTURE_VERSION = 0
+_BAKED_CHUNK_TEXTURE_KEEPALIVE = {}
+
+
+class _BakedTextureWrapper:
+    # Minimaler Fallback für Entity.texture: Ursinas texture_setter greift auf ._texture zu.
+    def __init__(self, panda_texture):
+        self._texture = panda_texture
+
+
+baked_texture_shader = Shader(
+    language=Shader.GLSL,
+    vertex=
+    "#version 120\n"
+    "uniform mat4 p3d_ModelViewProjectionMatrix;\n"
+    "attribute vec4 p3d_Vertex;\n"
+    "attribute vec2 p3d_MultiTexCoord0;\n"
+    "attribute vec4 p3d_Color;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec4 v_color;\n"
+    "void main(){\n"
+    "    gl_Position = p3d_ModelViewProjectionMatrix * p3d_Vertex;\n"
+    "    v_uv = p3d_MultiTexCoord0;\n"
+    "    v_color = p3d_Color;\n"
+    "}\n",
+    fragment=
+    "#version 120\n"
+    "uniform sampler2D p3d_Texture0;\n"
+    "varying vec2 v_uv;\n"
+    "varying vec4 v_color;\n"
+    "void main(){\n"
+    "    gl_FragColor = texture2D(p3d_Texture0, v_uv) * v_color;\n"
+    "}\n",
+)
+
+
+def _next_power_of_two(value):
+    value = max(1, int(math.ceil(float(value))))
+    return 1 << (value - 1).bit_length()
+
+
+def _ensure_pnm_alpha(img):
+    try:
+        if img.get_num_channels() < 4:
+            img.add_alpha()
+    except:
+        try:
+            img.add_alpha()
+        except:
+            pass
+    return img
+
+
+def _read_pnm_candidate(candidate):
+    img = PNMImage()
+    try:
+        if img.read(Filename(candidate)) and img.get_x_size() > 0 and img.get_y_size() > 0:
+            return _ensure_pnm_alpha(img)
+    except:
+        pass
+    return None
+
+
+def _source_atlas_pnm():
+    global _BAKED_SOURCE_ATLAS_IMAGE, _BAKED_SOURCE_TILE_SIZE
+
+    if _BAKED_SOURCE_ATLAS_IMAGE is not None and _BAKED_SOURCE_TILE_SIZE is not None:
+        return _BAKED_SOURCE_ATLAS_IMAGE, _BAKED_SOURCE_TILE_SIZE[0], _BAKED_SOURCE_TILE_SIZE[1]
+
+    img = None
+    base_name = str(texture)
+
+    # Erst direkt aus Dateien lesen. Das ist am stabilsten, weil die Zeilenrichtung
+    # dann der echten Atlas-Datei entspricht. Zusätzlich werden Ursinas asset_folder
+    # und ein lokaler assets/-Ordner probiert, bevor Texture.store als Fallback kommt.
+    base_candidates = [base_name]
+    try:
+        asset_folder = getattr(application, "asset_folder", None)
+        if asset_folder:
+            try:
+                base_candidates.append(str(asset_folder / base_name))
+            except:
+                pass
+            base_candidates.append(str(asset_folder) + "/" + base_name)
+    except:
+        pass
+    base_candidates.append("assets/" + base_name)
+
+    candidates = []
+    for base_candidate in base_candidates:
+        candidates.append(base_candidate)
+        if "." not in base_candidate.rsplit("/", 1)[-1]:
+            candidates.extend([base_candidate + ".png", base_candidate + ".jpg", base_candidate + ".jpeg"])
+
+    seen = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        img = _read_pnm_candidate(candidate)
+        if img is not None:
+            break
+
+    if img is None and atlas_texture is not None:
+        try:
+            temp = PNMImage()
+            # load_texture() gibt in Ursina normalerweise einen UrsinaTexture-Wrapper zurück.
+            # Der eigentliche Panda3D-Texture liegt dann in ._texture und nur der hat store().
+            raw_atlas_texture = getattr(atlas_texture, "_texture", atlas_texture)
+            if raw_atlas_texture is not None and raw_atlas_texture.store(temp) and temp.get_x_size() > 0 and temp.get_y_size() > 0:
+                img = _ensure_pnm_alpha(temp)
+        except:
+            img = None
+
+    if img is None:
+        print("Cross-type texture baking failed: atlas image could not be read.")
+        return None, None, None
+
+    tile_w = max(1, int(img.get_x_size()) // max(1, int(ATLAS_TILES_X)))
+    tile_h = max(1, int(img.get_y_size()) // max(1, int(ATLAS_TILES_Y)))
+
+    _BAKED_SOURCE_ATLAS_IMAGE = img
+    _BAKED_SOURCE_TILE_SIZE = (tile_w, tile_h)
+    return img, tile_w, tile_h
+
+
+def _new_pnm_image(width, height):
+    width = max(1, int(width))
+    height = max(1, int(height))
+    try:
+        img = PNMImage(width, height, 4)
+    except:
+        img = PNMImage(width, height)
+        try:
+            img.add_alpha()
+        except:
+            pass
+
+    try:
+        img.fill(0, 0, 0)
+    except:
+        pass
+    try:
+        img.alpha_fill(0)
+    except:
+        pass
+    return img
+
+
+def _get_pnm_pixel(img, x, y):
+    x = int(x)
+    y = int(y)
+    col = img.get_xel(x, y)
+    try:
+        alpha = img.get_alpha(x, y)
+    except:
+        alpha = 1.0
+    return col, alpha
+
+
+def _set_pnm_pixel(img, x, y, col, alpha=1.0):
+    x = int(x)
+    y = int(y)
+    try:
+        img.set_xel(x, y, col)
+    except:
+        try:
+            img.set_xel(x, y, float(col[0]), float(col[1]), float(col[2]))
+        except:
+            img.set_xel(x, y, 1, 1, 1)
+    try:
+        img.set_alpha(x, y, float(alpha))
+    except:
+        pass
+
+
+def _copy_pnm_pixel(img, sx, sy, dx, dy):
+    if dx < 0 or dy < 0 or dx >= img.get_x_size() or dy >= img.get_y_size():
+        return
+    if sx < 0 or sy < 0 or sx >= img.get_x_size() or sy >= img.get_y_size():
+        return
+    col, alpha = _get_pnm_pixel(img, sx, sy)
+    _set_pnm_pixel(img, dx, dy, col, alpha)
+
+
+def _pad_pnm_rect(img, x, y, w, h, padding):
+    padding = int(padding)
+    if padding <= 0 or w <= 0 or h <= 0:
+        return
+
+    # Links/rechts die Randpixel kopieren.
+    for p in range(1, padding + 1):
+        for yy in range(y, y + h):
+            _copy_pnm_pixel(img, x, yy, x - p, yy)
+            _copy_pnm_pixel(img, x + w - 1, yy, x + w - 1 + p, yy)
+
+    # Oben/unten inklusive der gerade erzeugten Seitenränder kopieren.
+    for p in range(1, padding + 1):
+        for xx in range(x - padding, x + w + padding):
+            src_x = min(max(xx, x), x + w - 1)
+            _copy_pnm_pixel(img, src_x, y, xx, y - p)
+            _copy_pnm_pixel(img, src_x, y + h - 1, xx, y + h - 1 + p)
+
+
+def _frac(value):
+    value = float(value)
+    return value - math.floor(value)
+
+
+def _single_block_face_verts(base, face_idx):
+    x = float(base[0])
+    y = float(base[1])
+    z = float(base[2])
+    x0 = x - 0.5
+    x1 = x + 0.5
+    y0 = y + float(_FACE_OFFSETS[0].y)
+    y1 = y + float(_FACE_OFFSETS[1].y)
+    z0 = z - 0.5
+    z1 = z + 0.5
+
+    face_idx = int(face_idx)
+    if face_idx == 0:
+        return [(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)]
+    if face_idx == 1:
+        return [(x0, y1, z0), (x0, y1, z1), (x1, y1, z1), (x1, y1, z0)]
+    if face_idx == 2:
+        return [(x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
+    if face_idx == 3:
+        return [(x0, y0, z0), (x0, y1, z0), (x1, y1, z0), (x1, y0, z0)]
+    if face_idx == 4:
+        return [(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)]
+    return [(x0, y0, z0), (x0, y0, z1), (x0, y1, z1), (x0, y1, z0)]
+
+
+def _cell_material_info(base, block_type, rotation, world_face_idx):
+    local_face_idx = _local_face_for_world_face(world_face_idx, rotation)
+    local_u_axis, local_v_axis = _LOCAL_FACE_UV_AXES.get(
+        local_face_idx,
+        ((1, 0, 0), (0, 1, 0)),
+    )
+
+    world_u_axis = _transform_local_axis_to_world(local_u_axis, rotation)
+    world_v_axis = _transform_local_axis_to_world(local_v_axis, rotation)
+    single_verts = _single_block_face_verts(base, world_face_idx)
+    raw_us = [_axis_coord_for_uv(v, world_u_axis) for v in single_verts]
+    raw_vs = [_axis_coord_for_uv(v, world_v_axis) for v in single_verts]
+
+    return {
+        "base": base,
+        "btype": block_type,
+        "brot": rotation,
+        "tile": _block_tile_for_world_face(block_type, rotation, int(world_face_idx)),
+        "u_axis": world_u_axis,
+        "v_axis": world_v_axis,
+        "u_min": min(raw_us),
+        "v_min": min(raw_vs),
+    }
+
+
+def _grid_cell_to_baked_cell(face_idx, width_cells, height_cells, du, dv):
+    face_idx = int(face_idx)
+    if face_idx == 1:
+        return int(du), int(height_cells - 1 - dv)
+    if face_idx in (3, 4):
+        return int(width_cells - 1 - du), int(dv)
+    return int(du), int(dv)
+
+
+def _world_point_from_baked_local(face_idx, slice_idx, grid_u0, grid_v0, width_cells, height_cells, local_u, local_v):
+    face_idx = int(face_idx)
+    slice_idx = float(slice_idx)
+    grid_u0 = float(grid_u0)
+    grid_v0 = float(grid_v0)
+    width_cells = float(width_cells)
+    height_cells = float(height_cells)
+    local_u = float(local_u)
+    local_v = float(local_v)
+    y_bottom = float(_FACE_OFFSETS[0].y)
+    y_top = float(_FACE_OFFSETS[1].y)
+
+    if face_idx == 0:
+        return (
+            grid_u0 - 0.5 + local_u,
+            slice_idx * BLOCK_HEIGHT + y_bottom,
+            grid_v0 - 0.5 + local_v,
+        )
+    if face_idx == 1:
+        return (
+            grid_u0 - 0.5 + local_u,
+            slice_idx * BLOCK_HEIGHT + y_top,
+            grid_v0 - 0.5 + (height_cells - local_v),
+        )
+    if face_idx == 2:
+        return (
+            grid_u0 - 0.5 + local_u,
+            grid_v0 * BLOCK_HEIGHT + y_bottom + local_v * BLOCK_HEIGHT,
+            slice_idx + 0.5,
+        )
+    if face_idx == 3:
+        return (
+            grid_u0 - 0.5 + (width_cells - local_u),
+            grid_v0 * BLOCK_HEIGHT + y_bottom + local_v * BLOCK_HEIGHT,
+            slice_idx - 0.5,
+        )
+    if face_idx == 4:
+        return (
+            slice_idx + 0.5,
+            grid_v0 * BLOCK_HEIGHT + y_bottom + local_v * BLOCK_HEIGHT,
+            grid_u0 - 0.5 + (width_cells - local_u),
+        )
+    return (
+        slice_idx - 0.5,
+        grid_v0 * BLOCK_HEIGHT + y_bottom + local_v * BLOCK_HEIGHT,
+        grid_u0 - 0.5 + local_u,
+    )
+
+
+def _source_pixel_for_cell(source_img, tile_w, tile_h, tile, f_u, f_v):
+    tx = max(0, min(int(ATLAS_TILES_X) - 1, int(tile[0])))
+    ty = max(0, min(int(ATLAS_TILES_Y) - 1, int(tile[1])))
+    f_u = max(0.0, min(0.999999, float(f_u)))
+    f_v = max(0.0, min(0.999999, float(f_v)))
+
+    sx = tx * tile_w + int(f_u * tile_w)
+    # Tile-Koordinaten in BLOCK_FACE_TILES sind wie im Bild: y=0 ist die obere Atlas-Zeile.
+    # UV-v=0 ist dagegen die Unterkante einer Kachel, deshalb wird die y-Achse hier gedreht.
+    sy = ty * tile_h + (tile_h - 1 - int(f_v * tile_h))
+    sx = max(0, min(source_img.get_x_size() - 1, sx))
+    sy = max(0, min(source_img.get_y_size() - 1, sy))
+    return _get_pnm_pixel(source_img, sx, sy)
+
+
+def _copy_cell_to_baked_texture(dst_img, source_img, tile_w, tile_h, job, du, dv):
+    info = job["grid"][(job["u"] + du, job["v"] + dv)]
+    baked_col, baked_row_bottom = _grid_cell_to_baked_cell(job["face"], job["w"], job["h"], du, dv)
+
+    dst_x0 = job["pack_x"] + baked_col * tile_w
+    dst_y0 = job["pack_y"] + (job["h"] - 1 - baked_row_bottom) * tile_h
+
+    for py in range(tile_h):
+        local_v = baked_row_bottom + 1.0 - ((py + 0.5) / tile_h)
+        for px in range(tile_w):
+            local_u = baked_col + ((px + 0.5) / tile_w)
+            world_point = _world_point_from_baked_local(
+                job["face"], job["slice_idx"], job["u"], job["v"], job["w"], job["h"], local_u, local_v
+            )
+
+            raw_u = _axis_coord_for_uv(world_point, info["u_axis"])
+            raw_v = _axis_coord_for_uv(world_point, info["v_axis"])
+            f_u = _frac(raw_u - info["u_min"])
+            f_v = _frac(raw_v - info["v_min"])
+
+            col, alpha = _source_pixel_for_cell(source_img, tile_w, tile_h, info["tile"], f_u, f_v)
+            _set_pnm_pixel(dst_img, dst_x0 + px, dst_y0 + py, col, alpha)
+
+
+def _build_baked_chunk_texture(quad_jobs, chunk_coord=None):
+    global _BAKED_TEXTURE_VERSION
+    if not quad_jobs:
+        return None, None, None, None, None
+
+    source_img, tile_w, tile_h = _source_atlas_pnm()
+    if source_img is None:
+        return None, None, None, None, None
+
+    padding = int(_BAKED_TEXTURE_PADDING)
+    total_area = 0
+    max_rect_w = 1
+    for job in quad_jobs:
+        job["tile_w"] = tile_w
+        job["tile_h"] = tile_h
+        job["tex_w"] = max(1, int(job["w"]) * tile_w)
+        job["tex_h"] = max(1, int(job["h"]) * tile_h)
+        packed_w = job["tex_w"] + padding * 2
+        packed_h = job["tex_h"] + padding * 2
+        total_area += packed_w * packed_h
+        max_rect_w = max(max_rect_w, packed_w)
+
+    target_w = _next_power_of_two(max(max_rect_w, math.sqrt(max(1, total_area))))
+
+    # Einfaches Shelf-Packing. Große Rechtecke zuerst packen weniger schlecht.
+    packing_order = sorted(range(len(quad_jobs)), key=lambda i: quad_jobs[i]["tex_h"] * quad_jobs[i]["tex_w"], reverse=True)
+    x = 0
+    y = 0
+    row_h = 0
+    for idx in packing_order:
+        job = quad_jobs[idx]
+        rect_w = job["tex_w"] + padding * 2
+        rect_h = job["tex_h"] + padding * 2
+        if x > 0 and x + rect_w > target_w:
+            x = 0
+            y += row_h
+            row_h = 0
+        job["pack_outer_x"] = x
+        job["pack_outer_y"] = y
+        job["pack_x"] = x + padding
+        job["pack_y"] = y + padding
+        x += rect_w
+        row_h = max(row_h, rect_h)
+
+    target_h = _next_power_of_two(y + row_h)
+    baked_img = _new_pnm_image(target_w, target_h)
+
+    for job in quad_jobs:
+        for du in range(job["w"]):
+            for dv in range(job["h"]):
+                _copy_cell_to_baked_texture(baked_img, source_img, tile_w, tile_h, job, du, dv)
+        _pad_pnm_rect(baked_img, job["pack_x"], job["pack_y"], job["tex_w"], job["tex_h"], padding)
+
+    # Wichtig: Nicht Ursinas Texture("name") benutzen — das interpretiert den String
+    # als Dateipfad. Außerdem bekommt jede Rebuild-Textur einen eindeutigen Namen;
+    # Panda/Ursina können sonst bei wiederverwendeten Chunk-Entities alte Texture-States
+    # oder Cache-Einträge behalten, was nach Abbauen/Bauen zu schwarzen Chunks führen kann.
+    _BAKED_TEXTURE_VERSION += 1
+    if chunk_coord is None:
+        tex_name = f"chunk_baked_mixed_tiles_{_BAKED_TEXTURE_VERSION}"
+    else:
+        cx, cy, cz = chunk_coord
+        tex_name = f"chunk_baked_mixed_tiles_{cx}_{cy}_{cz}_{_BAKED_TEXTURE_VERSION}"
+    panda_tex = PandaTexture(tex_name)
+    try:
+        panda_tex.load(baked_img)
+    except:
+        print("Cross-type texture baking failed: could not upload baked texture.")
+        return None, None, None, None, None
+
+    nearest = None
+    clamp_mode = None
+    for enum_owner in (PandaSamplerState, PandaTexture):
+        if nearest is None:
+            for name in ("FT_nearest", "FTNearest"):
+                if hasattr(enum_owner, name):
+                    nearest = getattr(enum_owner, name)
+                    break
+        if clamp_mode is None:
+            for name in ("WM_clamp", "WMClamp"):
+                if hasattr(enum_owner, name):
+                    clamp_mode = getattr(enum_owner, name)
+                    break
+
+    if nearest is not None:
+        for method_name in ("set_minfilter", "setMinfilter"):
+            try:
+                getattr(panda_tex, method_name)(nearest)
+                break
+            except:
+                pass
+        for method_name in ("set_magfilter", "setMagfilter"):
+            try:
+                getattr(panda_tex, method_name)(nearest)
+                break
+            except:
+                pass
+
+    if clamp_mode is not None:
+        for method_name in ("set_wrap_u", "setWrapU"):
+            try:
+                getattr(panda_tex, method_name)(clamp_mode)
+                break
+            except:
+                pass
+        for method_name in ("set_wrap_v", "setWrapV"):
+            try:
+                getattr(panda_tex, method_name)(clamp_mode)
+                break
+            except:
+                pass
+
+    try:
+        baked_tex = UrsinaTexture(panda_tex, filtering=None)
+    except:
+        # Fallback für Entity.texture: Der Setter erwartet ein Objekt mit ._texture.
+        baked_tex = _BakedTextureWrapper(panda_tex)
+
+    return baked_tex, panda_tex, tile_w, tile_h, (target_w, target_h)
+
+
+def _apply_baked_chunk_texture(ent, baked_tex, panda_tex):
+    """Bindet die gebackene Panda3D-Texture direkt und hält Referenzen am Entity.
+
+    Entity.texture alleine ist bei dynamisch erzeugten Texturen in manchen Ursina/Panda-
+    Kombinationen nicht zuverlässig, besonders wenn ein Chunk-Entity wiederverwendet wird.
+    Deshalb setzen wir die Texture zusätzlich direkt auf der NodePath und speichern starke
+    Referenzen, damit Python die Texture nicht freigibt.
+    """
+    try:
+        ent.shader = baked_texture_shader
+    except:
+        pass
+
+    try:
+        ent.color = color.white
+    except:
+        pass
+    for method_name, args in (
+        ("set_color", (1, 1, 1, 1)),
+        ("setColor", (1, 1, 1, 1)),
+        ("set_color_scale", (1, 1, 1, 1)),
+        ("setColorScale", (1, 1, 1, 1)),
+    ):
+        try:
+            getattr(ent, method_name)(*args)
+        except:
+            pass
+
+    # Alte Texture-States weg, dann die neue Panda-Texture direkt binden.
+    for method_name in ("clear_texture", "clearTexture"):
+        try:
+            getattr(ent, method_name)()
+            break
+        except:
+            pass
+
+    applied_directly = False
+    for method_name in ("set_texture", "setTexture"):
+        try:
+            getattr(ent, method_name)(panda_tex, 1)
+            applied_directly = True
+            break
+        except TypeError:
+            try:
+                getattr(ent, method_name)(panda_tex)
+                applied_directly = True
+                break
+            except:
+                pass
+        except:
+            pass
+
+    if not applied_directly:
+        try:
+            ent.texture = baked_tex
+        except:
+            pass
+
+    # Starke Referenzen: verhindert schwarze Chunks durch Garbage Collection der
+    # dynamisch erzeugten Texture/Wrapper nach dem Rebuild.
+    ent._baked_texture_ref = baked_tex
+    ent._baked_panda_texture_ref = panda_tex
+    try:
+        ent._texture = baked_tex
+    except:
+        pass
+
+
+def _make_baked_chunk_entity(mesh, baked_tex, panda_tex):
+    ent = Entity(model=mesh)
+    _apply_baked_chunk_texture(ent, baked_tex, panda_tex)
+    ent.collider = None  # Chunks bleiben absichtlich ohne Ursina-Collider.
+    ent.enabled = True
+    return ent
+
+
+def _baked_uv(job, local_u, local_v, baked_size):
+    tex_w, tex_h = baked_size
+    u = (job["pack_x"] + float(local_u) * job["tile_w"]) / max(1.0, float(tex_w))
+    # PNMImage-Zeilen laufen von oben nach unten; Texture-v läuft von unten nach oben.
+    v = 1.0 - ((job["pack_y"] + job["tex_h"] - float(local_v) * job["tile_h"]) / max(1.0, float(tex_h)))
+    return (u, v)
+
+
 def _rebuild_chunk_mesh(chunk_coord):
     chunk_coord = _ensure_chunk(chunk_coord)
     old = combined_terrains.get(chunk_coord)
 
     faces_snapshot = chunk_face_sets[chunk_coord]
     if not faces_snapshot:
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
         _safe_clear_destroy(old)
         combined_terrains[chunk_coord] = None
         return
 
-    vertices = []
-    triangles = []
-    uvs = []
-    normals = []
-    colors = []
+    quad_jobs = []
 
     faces_by_dir = {i: [] for i in range(6)}
     for fk in faces_snapshot:
@@ -617,15 +1217,16 @@ def _rebuild_chunk_mesh(chunk_coord):
                 slice_idx, u, v = ly, lx, lz
             elif d in (2, 3):
                 slice_idx, u, v = lz, lx, ly
-            elif d in (4, 5):
+            else:
                 slice_idx, u, v = lx, lz, ly
 
             if slice_idx not in slices:
                 slices[slice_idx] = {}
-            slices[slice_idx][(u, v)] = (btype, brot)
+            slices[slice_idx][(u, v)] = _cell_material_info(base, btype, brot, int(d))
 
         for slice_idx, grid in slices.items():
-            if not grid: continue
+            if not grid:
+                continue
 
             visited = set()
             keys = grid.keys()
@@ -637,18 +1238,19 @@ def _rebuild_chunk_mesh(chunk_coord):
                     if (u, v) in visited or (u, v) not in grid:
                         continue
 
-                    cell_data = grid[(u, v)]
-                    btype, brot = cell_data
-
+                    # Wichtig: Blocktyp, Textur-Kachel und Rotation sind hier ABSICHTLICH
+                    # keine Grenze mehr. Alles, was auf derselben Ebene ein sichtbares Face
+                    # hat, darf zu einem Quad werden. Die verschiedenen Texturen werden danach
+                    # in die Chunk-Textur gebacken.
                     w = 1
-                    while (u + w) <= max_u and (u + w, v) not in visited and grid.get((u + w, v)) == cell_data:
+                    while (u + w) <= max_u and (u + w, v) not in visited and (u + w, v) in grid:
                         w += 1
 
                     h = 1
                     can_expand = True
                     while (v + h) <= max_v and can_expand:
                         for du in range(w):
-                            if (u + du, v + h) in visited or grid.get((u + du, v + h)) != cell_data:
+                            if (u + du, v + h) in visited or (u + du, v + h) not in grid:
                                 can_expand = False
                                 break
                         if can_expand:
@@ -659,18 +1261,18 @@ def _rebuild_chunk_mesh(chunk_coord):
                             visited.add((u + du, v + dv))
 
                     if d in (0, 1):
-                        bx = float(u);
-                        by = float(slice_idx) * BLOCK_HEIGHT;
+                        bx = float(u)
+                        by = float(slice_idx) * BLOCK_HEIGHT
                         bz = float(v)
                         W_ext, H_ext, D_ext = w, BLOCK_HEIGHT, h
                     elif d in (2, 3):
-                        bx = float(u);
-                        by = float(v) * BLOCK_HEIGHT;
+                        bx = float(u)
+                        by = float(v) * BLOCK_HEIGHT
                         bz = float(slice_idx)
                         W_ext, H_ext, D_ext = w, h * BLOCK_HEIGHT, 1.0
                     else:
-                        bx = float(slice_idx);
-                        by = float(v) * BLOCK_HEIGHT;
+                        bx = float(slice_idx)
+                        by = float(v) * BLOCK_HEIGHT
                         bz = float(u)
                         W_ext, H_ext, D_ext = 1.0, h * BLOCK_HEIGHT, w
 
@@ -694,19 +1296,55 @@ def _rebuild_chunk_mesh(chunk_coord):
                     else:
                         quad_verts = [(X0, Y0, Z0), (X0, Y0, Z1), (X0, Y1, Z1), (X0, Y1, Z0)]
 
-                    tile = _block_tile_for_world_face(btype, brot, int(d))
-                    u0, v0, u1, v1 = _atlas_rect(tile[0], tile[1])
-                    rect = (u0, v0, u1, v1)
+                    quad_jobs.append({
+                        "face": int(d),
+                        "slice_idx": int(slice_idx),
+                        "u": int(u),
+                        "v": int(v),
+                        "w": int(w),
+                        "h": int(h),
+                        "grid": grid,
+                        "quad_verts": quad_verts,
+                        "W_ext": W_ext,
+                        "H_ext": H_ext,
+                        "D_ext": D_ext,
+                        "normal": _FACE_NORMALS_TUPLES.get(d, (0, 1, 0)),
+                    })
 
-                    quad_uvs = _rotated_uvs(d, brot, quad_verts)
-                    n = _FACE_NORMALS_TUPLES.get(d, (0, 1, 0))
+    if not quad_jobs:
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
+        _safe_clear_destroy(old)
+        combined_terrains[chunk_coord] = None
+        return
 
-                    idx0 = len(vertices)
-                    vertices.extend(quad_verts)
-                    uvs.extend(quad_uvs)
-                    colors.extend([rect, rect, rect, rect])
-                    normals.extend([n, n, n, n])
-                    triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+    baked_tex, panda_tex, tile_w, tile_h, baked_size = _build_baked_chunk_texture(quad_jobs, chunk_coord)
+    if baked_tex is None or panda_tex is None:
+        # Ohne lesbares Atlas-Bild kann ein einzelnes Quad nicht korrekt mehrere Texturen tragen.
+        # Lieber den Chunk leer lassen als wieder die kaputten smeared Textures zu zeichnen.
+        print("Chunk mesh skipped: baked texture was unavailable.")
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
+        _safe_clear_destroy(old)
+        combined_terrains[chunk_coord] = None
+        return
+
+    vertices = []
+    triangles = []
+    uvs = []
+    normals = []
+    colors = []
+
+    for job in quad_jobs:
+        quad_verts = job["quad_verts"]
+        local_uvs = _fast_uvs(job["face"], job["W_ext"], job["H_ext"], job["D_ext"])
+        quad_uvs = [_baked_uv(job, uv[0], uv[1], baked_size) for uv in local_uvs]
+        n = job["normal"]
+
+        idx0 = len(vertices)
+        vertices.extend(quad_verts)
+        uvs.extend(quad_uvs)
+        normals.extend([n, n, n, n])
+        colors.extend([(1, 1, 1, 1), (1, 1, 1, 1), (1, 1, 1, 1), (1, 1, 1, 1)])
+        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
 
     mesh = Mesh(
         vertices=vertices,
@@ -718,32 +1356,656 @@ def _rebuild_chunk_mesh(chunk_coord):
         static=True,
     )
 
-    tex = atlas_texture if atlas_texture is not None else texture
+    # Dynamisch gebackene Chunk-Texturen sind empfindlich gegenüber altem Render-State.
+    # Darum wird ein Chunk beim Rebuild neu erstellt statt das Entity in-place zu recyclen.
+    # Das verhindert den typischen "nach Bauen/Abbauen schwarz"-Bug.
+    if old is not None:
+        _safe_clear_destroy(old)
 
-    if old is None:
-        ent = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
-        ent.collider = None  # Chunks bleiben absichtlich ohne Ursina-Collider.
-        combined_terrains[chunk_coord] = ent
-        return
+    ent = _make_baked_chunk_entity(mesh, baked_tex, panda_tex)
+    ent._baked_chunk_coord = chunk_coord
+    _BAKED_CHUNK_TEXTURE_KEEPALIVE[chunk_coord] = (baked_tex, panda_tex)
+    combined_terrains[chunk_coord] = ent
+
+
+
+def _time_slice_should_yield():
+    return LAZY_REBUILD_FRAME_BUDGET > 0.0 and perf_counter() >= _REBUILD_JOB_DEADLINE
+
+
+def _chunk_rebuild_job_is_stale(chunk_coord, version):
+    return chunk_rebuild_versions.get(chunk_coord, 0) != version
+
+
+def _copy_cell_to_baked_texture_sliced(dst_img, source_img, tile_w, tile_h, job, du, dv):
+    """Wie _copy_cell_to_baked_texture(), aber mit Yield-Punkten pro Pixelzeile."""
+    info = job["grid"][(job["u"] + du, job["v"] + dv)]
+    baked_col, baked_row_bottom = _grid_cell_to_baked_cell(job["face"], job["w"], job["h"], du, dv)
+
+    dst_x0 = job["pack_x"] + baked_col * tile_w
+    dst_y0 = job["pack_y"] + (job["h"] - 1 - baked_row_bottom) * tile_h
+
+    for py in range(tile_h):
+        local_v = baked_row_bottom + 1.0 - ((py + 0.5) / tile_h)
+        for px in range(tile_w):
+            local_u = baked_col + ((px + 0.5) / tile_w)
+            world_point = _world_point_from_baked_local(
+                job["face"], job["slice_idx"], job["u"], job["v"], job["w"], job["h"], local_u, local_v
+            )
+
+            raw_u = _axis_coord_for_uv(world_point, info["u_axis"])
+            raw_v = _axis_coord_for_uv(world_point, info["v_axis"])
+            f_u = _frac(raw_u - info["u_min"])
+            f_v = _frac(raw_v - info["v_min"])
+
+            col, alpha = _source_pixel_for_cell(source_img, tile_w, tile_h, info["tile"], f_u, f_v)
+            _set_pnm_pixel(dst_img, dst_x0 + px, dst_y0 + py, col, alpha)
+
+        if _time_slice_should_yield():
+            yield
+
+
+def _build_baked_chunk_texture_sliced(quad_jobs, chunk_coord=None, version=0):
+    """Time-sliced Version von _build_baked_chunk_texture().
+
+    Der teure Teil ist das pixelweise Kopieren in die gebackene Chunk-Textur.
+    Diese Version stoppt nach dem Frame-Budget und macht im nächsten Frame weiter,
+    statt nach einer festen Verzögerung alles auf einmal zu bauen.
+    """
+    global _BAKED_TEXTURE_VERSION
+    if not quad_jobs:
+        return None, None, None, None, None
+
+    source_img, tile_w, tile_h = _source_atlas_pnm()
+    if source_img is None:
+        return None, None, None, None, None
+
+    padding = int(_BAKED_TEXTURE_PADDING)
+    total_area = 0
+    max_rect_w = 1
+    for job in quad_jobs:
+        if chunk_coord is not None and _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return None, None, None, None, None
+
+        job["tile_w"] = tile_w
+        job["tile_h"] = tile_h
+        job["tex_w"] = max(1, int(job["w"]) * tile_w)
+        job["tex_h"] = max(1, int(job["h"]) * tile_h)
+        packed_w = job["tex_w"] + padding * 2
+        packed_h = job["tex_h"] + padding * 2
+        total_area += packed_w * packed_h
+        max_rect_w = max(max_rect_w, packed_w)
+
+        if _time_slice_should_yield():
+            yield
+
+    target_w = _next_power_of_two(max(max_rect_w, math.sqrt(max(1, total_area))))
+
+    packing_order = sorted(range(len(quad_jobs)), key=lambda i: quad_jobs[i]["tex_h"] * quad_jobs[i]["tex_w"], reverse=True)
+    x = 0
+    y = 0
+    row_h = 0
+    for idx in packing_order:
+        if chunk_coord is not None and _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return None, None, None, None, None
+
+        job = quad_jobs[idx]
+        rect_w = job["tex_w"] + padding * 2
+        rect_h = job["tex_h"] + padding * 2
+        if x > 0 and x + rect_w > target_w:
+            x = 0
+            y += row_h
+            row_h = 0
+        job["pack_outer_x"] = x
+        job["pack_outer_y"] = y
+        job["pack_x"] = x + padding
+        job["pack_y"] = y + padding
+        x += rect_w
+        row_h = max(row_h, rect_h)
+
+        if _time_slice_should_yield():
+            yield
+
+    target_h = _next_power_of_two(y + row_h)
+    baked_img = _new_pnm_image(target_w, target_h)
+
+    if _time_slice_should_yield():
+        yield
+
+    for job in quad_jobs:
+        if chunk_coord is not None and _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return None, None, None, None, None
+
+        for du in range(job["w"]):
+            for dv in range(job["h"]):
+                if chunk_coord is not None and _chunk_rebuild_job_is_stale(chunk_coord, version):
+                    return None, None, None, None, None
+
+                yield from _copy_cell_to_baked_texture_sliced(baked_img, source_img, tile_w, tile_h, job, du, dv)
+
+                if _time_slice_should_yield():
+                    yield
+
+        # Padding ist deutlich günstiger als das eigentliche Pixel-Baking, aber bei
+        # großen Quads trotzdem nicht im selben Budget erzwingen.
+        if _time_slice_should_yield():
+            yield
+        _pad_pnm_rect(baked_img, job["pack_x"], job["pack_y"], job["tex_w"], job["tex_h"], padding)
+        if _time_slice_should_yield():
+            yield
+
+    # Texture-Upload kann nicht sinnvoll in Python auf mehrere Frames geteilt werden.
+    # Deshalb starten wir ihn wenigstens am Anfang eines frischen Frame-Budgets.
+    if _time_slice_should_yield():
+        yield
+
+    if chunk_coord is not None and _chunk_rebuild_job_is_stale(chunk_coord, version):
+        return None, None, None, None, None
+
+    _BAKED_TEXTURE_VERSION += 1
+    if chunk_coord is None:
+        tex_name = f"chunk_baked_mixed_tiles_{_BAKED_TEXTURE_VERSION}"
+    else:
+        cx, cy, cz = chunk_coord
+        tex_name = f"chunk_baked_mixed_tiles_{cx}_{cy}_{cz}_{_BAKED_TEXTURE_VERSION}"
+    panda_tex = PandaTexture(tex_name)
+    try:
+        panda_tex.load(baked_img)
+    except:
+        print("Cross-type texture baking failed: could not upload baked texture.")
+        return None, None, None, None, None
+
+    nearest = None
+    clamp_mode = None
+    for enum_owner in (PandaSamplerState, PandaTexture):
+        if nearest is None:
+            for name in ("FT_nearest", "FTNearest"):
+                if hasattr(enum_owner, name):
+                    nearest = getattr(enum_owner, name)
+                    break
+        if clamp_mode is None:
+            for name in ("WM_clamp", "WMClamp"):
+                if hasattr(enum_owner, name):
+                    clamp_mode = getattr(enum_owner, name)
+                    break
+
+    if nearest is not None:
+        for method_name in ("set_minfilter", "setMinfilter"):
+            try:
+                getattr(panda_tex, method_name)(nearest)
+                break
+            except:
+                pass
+        for method_name in ("set_magfilter", "setMagfilter"):
+            try:
+                getattr(panda_tex, method_name)(nearest)
+                break
+            except:
+                pass
+
+    if clamp_mode is not None:
+        for method_name in ("set_wrap_u", "setWrapU"):
+            try:
+                getattr(panda_tex, method_name)(clamp_mode)
+                break
+            except:
+                pass
+        for method_name in ("set_wrap_v", "setWrapV"):
+            try:
+                getattr(panda_tex, method_name)(clamp_mode)
+                break
+            except:
+                pass
 
     try:
-        old.model = mesh
-        old.texture = tex
-        old.shader = atlas_repeat_shader
-        old.collider = None
-        old.enabled = True
-        combined_terrains[chunk_coord] = old
+        baked_tex = UrsinaTexture(panda_tex, filtering=None)
     except:
+        baked_tex = _BakedTextureWrapper(panda_tex)
+
+    return baked_tex, panda_tex, tile_w, tile_h, (target_w, target_h)
+
+
+def _build_chunk_quad_jobs_sliced(chunk_coord, faces_snapshot, version):
+    quad_jobs = []
+
+    faces_by_dir = {i: [] for i in range(6)}
+    for fk in faces_snapshot:
+        if _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return None
+        faces_by_dir[int(fk[1])].append(fk)
+        if _time_slice_should_yield():
+            yield
+
+    for d in range(6):
+        if _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return None
+        if not faces_by_dir[d]:
+            continue
+
+        slices = {}
+        for fk in faces_by_dir[d]:
+            if _chunk_rebuild_job_is_stale(chunk_coord, version):
+                return None
+
+            pos_key, fidx = fk
+            base = _cube_base_from_face(pos_key, fidx)
+            btype = _block_type_from_face_key(fk)
+            brot = _block_rotation_from_base(base, btype)
+
+            lx = int(round(base[0]))
+            ly = int(round(base[1] / BLOCK_HEIGHT))
+            lz = int(round(base[2]))
+
+            if d in (0, 1):
+                slice_idx, u, v = ly, lx, lz
+            elif d in (2, 3):
+                slice_idx, u, v = lz, lx, ly
+            else:
+                slice_idx, u, v = lx, lz, ly
+
+            if slice_idx not in slices:
+                slices[slice_idx] = {}
+            slices[slice_idx][(u, v)] = _cell_material_info(base, btype, brot, int(d))
+
+            if _time_slice_should_yield():
+                yield
+
+        for slice_idx, grid in slices.items():
+            if _chunk_rebuild_job_is_stale(chunk_coord, version):
+                return None
+            if not grid:
+                continue
+
+            visited = set()
+            keys = grid.keys()
+            min_u, max_u = min(k[0] for k in keys), max(k[0] for k in keys)
+            min_v, max_v = min(k[1] for k in keys), max(k[1] for k in keys)
+
+            for v in range(min_v, max_v + 1):
+                for u in range(min_u, max_u + 1):
+                    if _chunk_rebuild_job_is_stale(chunk_coord, version):
+                        return None
+                    if (u, v) in visited or (u, v) not in grid:
+                        continue
+
+                    w = 1
+                    while (u + w) <= max_u and (u + w, v) not in visited and (u + w, v) in grid:
+                        w += 1
+
+                    h = 1
+                    can_expand = True
+                    while (v + h) <= max_v and can_expand:
+                        for du in range(w):
+                            if (u + du, v + h) in visited or (u + du, v + h) not in grid:
+                                can_expand = False
+                                break
+                        if can_expand:
+                            h += 1
+
+                    for du in range(w):
+                        for dv in range(h):
+                            visited.add((u + du, v + dv))
+
+                    if d in (0, 1):
+                        bx = float(u)
+                        by = float(slice_idx) * BLOCK_HEIGHT
+                        bz = float(v)
+                        W_ext, H_ext, D_ext = w, BLOCK_HEIGHT, h
+                    elif d in (2, 3):
+                        bx = float(u)
+                        by = float(v) * BLOCK_HEIGHT
+                        bz = float(slice_idx)
+                        W_ext, H_ext, D_ext = w, h * BLOCK_HEIGHT, 1.0
+                    else:
+                        bx = float(slice_idx)
+                        by = float(v) * BLOCK_HEIGHT
+                        bz = float(u)
+                        W_ext, H_ext, D_ext = 1.0, h * BLOCK_HEIGHT, w
+
+                    X0 = bx - 0.5
+                    X1 = bx - 0.5 + W_ext
+                    Y0 = by + float(_FACE_OFFSETS[0].y)
+                    Y1 = by + float(_FACE_OFFSETS[0].y) + H_ext
+                    Z0 = bz - 0.5
+                    Z1 = bz - 0.5 + D_ext
+
+                    if d == 0:
+                        quad_verts = [(X0, Y0, Z0), (X1, Y0, Z0), (X1, Y0, Z1), (X0, Y0, Z1)]
+                    elif d == 1:
+                        quad_verts = [(X0, Y1, Z0), (X0, Y1, Z1), (X1, Y1, Z1), (X1, Y1, Z0)]
+                    elif d == 2:
+                        quad_verts = [(X0, Y0, Z1), (X1, Y0, Z1), (X1, Y1, Z1), (X0, Y1, Z1)]
+                    elif d == 3:
+                        quad_verts = [(X0, Y0, Z0), (X0, Y1, Z0), (X1, Y1, Z0), (X1, Y0, Z0)]
+                    elif d == 4:
+                        quad_verts = [(X1, Y0, Z0), (X1, Y1, Z0), (X1, Y1, Z1), (X1, Y0, Z1)]
+                    else:
+                        quad_verts = [(X0, Y0, Z0), (X0, Y0, Z1), (X0, Y1, Z1), (X0, Y1, Z0)]
+
+                    quad_jobs.append({
+                        "face": int(d),
+                        "slice_idx": int(slice_idx),
+                        "u": int(u),
+                        "v": int(v),
+                        "w": int(w),
+                        "h": int(h),
+                        "grid": grid,
+                        "quad_verts": quad_verts,
+                        "W_ext": W_ext,
+                        "H_ext": H_ext,
+                        "D_ext": D_ext,
+                        "normal": _FACE_NORMALS_TUPLES.get(d, (0, 1, 0)),
+                    })
+
+                    if _time_slice_should_yield():
+                        yield
+
+    return quad_jobs
+
+
+def _rebuild_chunk_mesh_sliced(chunk_coord, version):
+    """Generator-Version von _rebuild_chunk_mesh().
+
+    Diese Funktion erledigt Greedy-Suche, Texture-Baking und Mesh-Listenaufbau in
+    kleinen Stücken. Nur der finale Texture-Upload/Mesh-Konstruktor bleibt ein kurzer
+    atomarer Schritt, weil Panda3D/Ursina das nicht zeilenweise übernehmen können.
+    """
+    chunk_coord = _ensure_chunk(chunk_coord)
+    old = combined_terrains.get(chunk_coord)
+
+    faces_snapshot = list(chunk_face_sets.get(chunk_coord, ()))
+    if not faces_snapshot:
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
         _safe_clear_destroy(old)
-        ent = Entity(model=mesh, texture=tex, shader=atlas_repeat_shader)
-        ent.collider = None  # Chunks bleiben absichtlich ohne Ursina-Collider.
-        combined_terrains[chunk_coord] = ent
+        combined_terrains[chunk_coord] = None
+        return {"finished": True}
+
+    if _time_slice_should_yield():
+        yield
+
+    quad_jobs = yield from _build_chunk_quad_jobs_sliced(chunk_coord, faces_snapshot, version)
+    if quad_jobs is None or _chunk_rebuild_job_is_stale(chunk_coord, version):
+        return {"cancelled": True}
+
+    if not quad_jobs:
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
+        _safe_clear_destroy(old)
+        combined_terrains[chunk_coord] = None
+        return {"finished": True}
+
+    baked_tex, panda_tex, tile_w, tile_h, baked_size = yield from _build_baked_chunk_texture_sliced(
+        quad_jobs, chunk_coord=chunk_coord, version=version
+    )
+    if _chunk_rebuild_job_is_stale(chunk_coord, version):
+        return {"cancelled": True}
+
+    if baked_tex is None or panda_tex is None:
+        print("Chunk mesh skipped: baked texture was unavailable.")
+        _BAKED_CHUNK_TEXTURE_KEEPALIVE.pop(chunk_coord, None)
+        _safe_clear_destroy(old)
+        combined_terrains[chunk_coord] = None
+        return {"finished": True, "bake_failed": True}
+
+    vertices = []
+    triangles = []
+    uvs = []
+    normals = []
+    colors = []
+
+    for job in quad_jobs:
+        if _chunk_rebuild_job_is_stale(chunk_coord, version):
+            return {"cancelled": True}
+
+        quad_verts = job["quad_verts"]
+        local_uvs = _fast_uvs(job["face"], job["W_ext"], job["H_ext"], job["D_ext"])
+        quad_uvs = [_baked_uv(job, uv[0], uv[1], baked_size) for uv in local_uvs]
+        n = job["normal"]
+
+        idx0 = len(vertices)
+        vertices.extend(quad_verts)
+        uvs.extend(quad_uvs)
+        normals.extend([n, n, n, n])
+        colors.extend([(1, 1, 1, 1), (1, 1, 1, 1), (1, 1, 1, 1), (1, 1, 1, 1)])
+        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+
+        if _time_slice_should_yield():
+            yield
+
+    # Mesh-Konstruktion/Entity-Swap am Anfang eines neuen Budgets starten.
+    if _time_slice_should_yield():
+        yield
+
+    if _chunk_rebuild_job_is_stale(chunk_coord, version):
+        return {"cancelled": True}
+
+    mesh = Mesh(
+        vertices=vertices,
+        triangles=triangles,
+        uvs=uvs,
+        normals=normals,
+        colors=colors,
+        mode="triangle",
+        static=True,
+    )
+
+    if old is not None:
+        _safe_clear_destroy(old)
+
+    ent = _make_baked_chunk_entity(mesh, baked_tex, panda_tex)
+    ent._baked_chunk_coord = chunk_coord
+    _BAKED_CHUNK_TEXTURE_KEEPALIVE[chunk_coord] = (baked_tex, panda_tex)
+    combined_terrains[chunk_coord] = ent
+    return {"finished": True}
+
+def _clear_dirty_chunk_preview(chunk_coord):
+    chunk_coord = _ensure_chunk(chunk_coord)
+    old_preview = dirty_chunk_previews.pop(chunk_coord, None)
+    _safe_clear_destroy(old_preview)
 
 
-def _refresh_chunks(affected_chunks):
+def _hide_final_chunk_for_preview(chunk_coord):
+    ent = combined_terrains.get(chunk_coord)
+    if ent is None:
+        return
+    try:
+        ent.enabled = False
+    except:
+        pass
+
+
+def _make_dirty_chunk_preview(chunk_coord):
+    """Billiges Sofort-Mesh für einen dirty Chunk.
+
+    Dieses Mesh ist NICHT greedy und backt keine Textur. Es baut nur die aktuell
+    sichtbaren Faces einzeln mit dem vorhandenen Atlas-Shader. Dadurch sieht der
+    Chunk direkt nach Bauen/Abbauen korrekt aus, während der echte Greedy-Rebuild
+    später im Hintergrund/Queue nachzieht.
+    """
+    if not DIRTY_PREVIEW_ENABLED:
+        return
+
+    chunk_coord = _ensure_chunk(chunk_coord)
+
+    # Altes Preview ersetzen.
+    old_preview = dirty_chunk_previews.pop(chunk_coord, None)
+    _safe_clear_destroy(old_preview)
+
+    # Den alten Greedy-Chunk ausblenden, sonst würden entfernte Blöcke/Faces
+    # bis zum Rebuild noch im alten gebackenen Mesh sichtbar bleiben.
+    _hide_final_chunk_for_preview(chunk_coord)
+
+    faces = list(chunk_face_sets.get(chunk_coord, ()))
+    if not faces:
+        return
+
+    vertices = []
+    triangles = []
+    uvs = []
+    normals = []
+    colors = []
+
+    for fk in faces:
+        pos_key, fidx = fk
+        face_idx = int(fidx)
+        base = _cube_base_from_face(pos_key, face_idx)
+        btype = _block_type_from_face_key(fk)
+        brot = _block_rotation_from_base(base, btype)
+
+        quad_verts = _single_block_face_verts(base, face_idx)
+        quad_uvs = _rotated_uvs(face_idx, brot, quad_verts)
+        tile = _block_tile_for_world_face(btype, brot, face_idx)
+        tile_rect = _atlas_rect(tile[0], tile[1])
+        n = _FACE_NORMALS_TUPLES.get(face_idx, (0, 1, 0))
+
+        idx0 = len(vertices)
+        vertices.extend(quad_verts)
+        uvs.extend(quad_uvs)
+        normals.extend([n, n, n, n])
+        colors.extend([tile_rect, tile_rect, tile_rect, tile_rect])
+        triangles.extend([idx0, idx0 + 2, idx0 + 1, idx0, idx0 + 3, idx0 + 2])
+
+    mesh = Mesh(
+        vertices=vertices,
+        triangles=triangles,
+        uvs=uvs,
+        normals=normals,
+        colors=colors,
+        mode="triangle",
+        static=False,
+    )
+
+    ent = Entity(model=mesh)
+    try:
+        ent.texture = atlas_texture
+    except:
+        pass
+    try:
+        ent.shader = atlas_repeat_shader
+    except:
+        pass
+    ent.collider = None
+    ent.enabled = True
+    dirty_chunk_previews[chunk_coord] = ent
+
+
+def _queue_lazy_chunk_rebuild(chunk_coord, settle_delay=LAZY_REBUILD_SETTLE_DELAY, make_preview=True):
+    """Chunk dirty markieren und einen time-sliced Greedy-Rebuild planen.
+
+    settle_delay ist nur die kurze Sammelzeit für mehrere schnelle Änderungen.
+    Die eigentliche Mesh-Arbeit passiert später über LAZY_REBUILD_FRAME_BUDGET.
+    """
+    if chunk_coord is None:
+        return
+
+    chunk_coord = _ensure_chunk(chunk_coord)
+
+    if make_preview:
+        _make_dirty_chunk_preview(chunk_coord)
+
+    chunk_rebuild_versions[chunk_coord] = chunk_rebuild_versions.get(chunk_coord, 0) + 1
+    chunk_update_due[chunk_coord] = perf_counter() + float(settle_delay)
+
+    if chunk_coord not in chunk_update_set:
+        chunk_update_queue.append(chunk_coord)
+        chunk_update_set.add(chunk_coord)
+
+
+def _refresh_chunks(affected_chunks, settle_delay=LAZY_REBUILD_SETTLE_DELAY, make_preview=True):
+    """Markiert Chunks dirty, ohne sofort das teure Greedy-Mesh zu bauen."""
     for chunk_coord in affected_chunks:
-        if chunk_coord is not None and chunk_coord not in chunk_update_queue:
-            chunk_update_queue.append(chunk_coord)
+        _queue_lazy_chunk_rebuild(chunk_coord, settle_delay=settle_delay, make_preview=make_preview)
+
+
+def _finish_lazy_chunk_rebuild_result(chunk_coord, result):
+    # Wenn der Greedy-Rebuild erfolgreich war oder der Chunk leer ist, kann das
+    # Preview weg. Wenn Baking fehlschlägt und noch Faces existieren, bleibt das
+    # Preview als sichtbarer Fallback erhalten.
+    if result is None:
+        result = {}
+    if result.get("cancelled"):
+        return
+
+    has_faces = bool(chunk_face_sets.get(chunk_coord))
+    final_ent = combined_terrains.get(chunk_coord)
+
+    if final_ent is not None:
+        try:
+            final_ent.enabled = True
+        except:
+            pass
+
+    if final_ent is not None or not has_faces:
+        _clear_dirty_chunk_preview(chunk_coord)
+
+
+def _pop_due_chunk_for_rebuild(now):
+    checks_left = len(chunk_update_queue)
+    while chunk_update_queue and checks_left > 0:
+        chunk_coord = chunk_update_queue.pop(0)
+        chunk_update_set.discard(chunk_coord)
+        checks_left -= 1
+
+        due = chunk_update_due.get(chunk_coord, 0.0)
+        if now < due:
+            if chunk_coord not in chunk_update_set:
+                chunk_update_queue.append(chunk_coord)
+                chunk_update_set.add(chunk_coord)
+            continue
+
+        chunk_update_due.pop(chunk_coord, None)
+        return chunk_coord
+
+    return None
+
+
+def _process_lazy_chunk_rebuilds():
+    """Verteilt den teuren Greedy-/Bake-Rebuild auf mehrere Frames."""
+    global active_chunk_rebuild_job, _REBUILD_JOB_DEADLINE
+
+    frame_start = perf_counter()
+    frame_budget = max(0.0005, float(LAZY_REBUILD_FRAME_BUDGET))
+    _REBUILD_JOB_DEADLINE = frame_start + frame_budget
+
+    while perf_counter() < _REBUILD_JOB_DEADLINE:
+        if active_chunk_rebuild_job is not None:
+            coord = active_chunk_rebuild_job["coord"]
+            version = active_chunk_rebuild_job["version"]
+            if _chunk_rebuild_job_is_stale(coord, version):
+                active_chunk_rebuild_job = None
+                continue
+
+        if active_chunk_rebuild_job is None:
+            chunk_coord = _pop_due_chunk_for_rebuild(perf_counter())
+            if chunk_coord is None:
+                break
+
+            version = chunk_rebuild_versions.get(chunk_coord, 0)
+            active_chunk_rebuild_job = {
+                "coord": chunk_coord,
+                "version": version,
+                "gen": _rebuild_chunk_mesh_sliced(chunk_coord, version),
+            }
+
+        job = active_chunk_rebuild_job
+        try:
+            next(job["gen"])
+        except StopIteration as stop:
+            coord = job["coord"]
+            version = job["version"]
+            result = stop.value if stop.value is not None else {}
+            active_chunk_rebuild_job = None
+
+            if result.get("cancelled") or _chunk_rebuild_job_is_stale(coord, version):
+                # Eine neuere Änderung hat diesen Job überholt. Der neuere Job wurde
+                # beim Dirty-Markieren bereits wieder in die Queue gelegt.
+                continue
+
+            _finish_lazy_chunk_rebuild_result(coord, result)
+            continue
+
+        # Der Generator hat wegen Budget-Ende freiwillig pausiert.
+        if perf_counter() >= _REBUILD_JOB_DEADLINE:
+            break
 
 
 def _expand_chunk_neighborhood(chunks, radius=1):
@@ -1815,11 +3077,6 @@ def build(placement_rotation=DEFAULT_BLOCK_ROTATION):
             tgt = _chunk_coord_from_face(fp, i)
             _add_face(same, tgt, affected)
 
-    main_chunk = _chunk_coord_from_pos(cube_base)
-    if main_chunk in affected:
-        _rebuild_chunk_mesh(main_chunk)
-        affected.discard(main_chunk)
-
     _refresh_chunks(affected)
     c.y = -9999
 
@@ -1852,11 +3109,6 @@ def mine(face_pos=None, face_idx=None):
     if below in block_types and _normalize_block_type(block_types[below]) == "grass":
         _set_block_type(below, "dirt")
 
-    main_chunk = _chunk_coord_from_pos(cube_base)
-    if main_chunk in affected:
-        _rebuild_chunk_mesh(main_chunk)
-        affected.discard(main_chunk)
-
     _refresh_chunks(affected)
     c.y = -9999
 
@@ -1867,9 +3119,7 @@ def _frame_position_for_target(face_pos, face_idx):
 
 
 def update():
-    if chunk_update_queue:
-        chunk_to_update = chunk_update_queue.pop(0)
-        _rebuild_chunk_mesh(chunk_to_update)
+    _process_lazy_chunk_rebuilds()
 
 
 class PlayerPhysicsController(Entity):
